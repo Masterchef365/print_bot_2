@@ -1,0 +1,18 @@
+[package]
+name = "print_bot_2"
+version = "0.1.0"
+authors = ["Masterchef365 <duncan.freeman1@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+image = "^0.23"
+hyper = "0.10"
+hyper-native-tls = "0.3.0"
+anyhow = "1"
+dither = "1.3"
+escposify = "0.4"
+
+[dependencies.discord]
+git = "https://github.com/SpaceManiac/discord-rs"
+rev = "245f57317a2c2377fd27b63e9c623e3af10e169d"
+features = []

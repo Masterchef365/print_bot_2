@@ -12,24 +12,48 @@ use std::env;
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 struct Handler {
     client: Client,
     ditherer: Ditherer<'static>,
-    printer: Sender<image::RgbImage>,
+    printer: Sender<PrinterMsg>,
 }
 
-fn printer_thread(receiver: Receiver<image::RgbImage>) -> Result<()> {
-    let mut usb_context = libusb::Context::new().expect("Failed to create LibUSB context.");
-    let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(90))
-        .expect("Failed to connect to printer");
+enum PrinterMsg {
+    Image(image::RgbImage),
+    Text(String),
+}
+
+fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
+    println!("Starting printer thread...");
+    use std::io::Write;
+    std::io::stdout().flush()?;
+    let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
+    let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(1))
+        .context("Failed to connect to printer")?;
     let mut printer = Printer::new(&mut device, None, None);
-    while let Ok(image) = receiver.recv() {
-        let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
-        printer
-            .chain_align("ct")?
-            .chain_bit_image(&image, None)?
-            .flush()?;
+    printer
+        .chain_align("ct")?
+        .chain_println("Welcome to Discord!\n\n\n\n")?
+        .flush()?;
+
+    println!("Printer thread initialized!");
+    while let Ok(msg) = receiver.recv() {
+        match msg {
+            PrinterMsg::Image(image) => {
+                let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
+                printer
+                    .chain_align("ct")?
+                    .chain_bit_image(&image, None)?
+                    .flush()?;
+            }
+            PrinterMsg::Text(text) => {
+                printer.chain_align("lt")?
+                    .chain_println(&text)?
+                    .flush()?;
+            }
+        }
     }
     eprintln!("Note: printer thread stopped.");
     Ok(())
@@ -42,7 +66,7 @@ impl Handler {
         let client = hyper::Client::with_connector(connector);
         let ditherer = Ditherer::from_str("floyd")?;
         let (printer, receiver) = mpsc::channel();
-        std::thread::spawn(move || log_result(printer_thread(receiver)));
+        thread::spawn(move || log_result(printer_thread(receiver)));
         Ok(Self {
             client,
             ditherer,
@@ -55,6 +79,21 @@ impl Handler {
             return Ok(());
         }
 
+        // Name print
+        let author = message.author.name;
+        self.printer
+            .send(PrinterMsg::Text(format!("{}:", author)))
+            .expect("Printer thread died");
+
+        // Text printing
+        let text = message.content.trim_start_matches("!print").trim_start();
+        if !text.is_empty() {
+            self.printer
+                .send(PrinterMsg::Text(text.into()))
+                .expect("Printer thread died");
+        }
+
+        // Image printing
         for att in message.attachments {
             // Download the image
             let mut image = self
@@ -69,6 +108,14 @@ impl Handler {
 
             // Decode the image
             let image = image::load_from_memory(&buf).context("Image parse failed")?;
+
+            // Resize to fit the printer
+            const PRINTER_DOTS_PER_LINE: u32 = 384;
+            let image = image.resize(
+                PRINTER_DOTS_PER_LINE,
+                9000,
+                image::imageops::FilterType::Triangle,
+            );
 
             // Convert to the ditherer's image format
             let image: Img<RGB<f64>> = Img::new(
@@ -92,7 +139,9 @@ impl Handler {
 
             // Send image to the printer thread
             // NOTE: This is a fatal error; the expect is intentional!
-            self.printer.send(image).expect("Printer thread died"); 
+            self.printer
+                .send(PrinterMsg::Image(image))
+                .expect("Printer thread died");
         }
         Ok(())
     }
@@ -100,19 +149,22 @@ impl Handler {
 
 fn log_result(res: Result<()>) {
     if let Err(e) = res {
-        println!("Error: {}", e);
+        println!("Error: {:#}", e);
     }
 }
 
 fn main() -> Result<()> {
+    let handler = thread::spawn(|| Handler::new().map_err(|e| e.to_string()));
+
     // Log in to Discord using a bot token from the environment
+    println!("Logging into discord");
     let discord = Discord::from_bot_token(&env::var("DISCORD_TOKEN").context("Expected token")?)
         .context("login failed")?;
 
+    let mut handler = handler.join().unwrap().unwrap();
+
     // Establish and use a websocket connection
     let (mut connection, _) = discord.connect().context("connect failed")?;
-
-    let mut handler = Handler::new()?;
 
     println!("Ready.");
     loop {

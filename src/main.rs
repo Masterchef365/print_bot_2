@@ -17,10 +17,12 @@ use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
+// Settings
+const MAX_DOWNLOAD_SIZE: u64 = 1024 * 1024 * 8; // 8MB
+
+// Printer constants
 const PRINTER_CHARS_PER_LINE: usize = 32;
 const PRINTER_DOTS_PER_LINE: u32 = 384;
-const MAX_DOWNLOAD_SIZE: u64 = 1024 * 1024 * 8; // 8MB
-//const MAX_DOWNLOAD_SIZE: u64 = 1024; // 8MB
 
 /// Message handling service
 struct Handler {
@@ -271,4 +273,17 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_validation() {
+        assert_eq!(validate_url("https://fuck.com"), None);
+        assert_eq!(validate_url("https://fuck.com/wat.png"), Some(Url::parse("https://fuck.com/wat.png").unwrap()));
+        assert_eq!(validate_url("https://fuck.com/wat.html"), None);
+        assert_eq!(validate_url("wat.png"), None);
+    }
 }

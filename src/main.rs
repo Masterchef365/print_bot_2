@@ -2,17 +2,37 @@ use anyhow::{Context, Result};
 use discord::model::Event;
 use discord::{model::Message, Discord};
 use dither::prelude::*;
+use escposify::{img::Image as EscImage, printer::Printer};
 use hyper::net::HttpsConnector;
 use hyper::Client;
 use hyper_native_tls::NativeTlsClient;
 use image::GenericImageView;
+use pos58_usb::POS58USB;
 use std::env;
 use std::io::Read;
 use std::str::FromStr;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 struct Handler {
     client: Client,
     ditherer: Ditherer<'static>,
+    printer: Sender<image::RgbImage>,
+}
+
+fn printer_thread(receiver: Receiver<image::RgbImage>) -> Result<()> {
+    let mut usb_context = libusb::Context::new().expect("Failed to create LibUSB context.");
+    let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(90))
+        .expect("Failed to connect to printer");
+    let mut printer = Printer::new(&mut device, None, None);
+    while let Ok(image) = receiver.recv() {
+        let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
+        printer
+            .chain_align("ct")?
+            .chain_bit_image(&image, None)?
+            .flush()?;
+    }
+    eprintln!("Note: printer thread stopped.");
+    Ok(())
 }
 
 impl Handler {
@@ -21,7 +41,13 @@ impl Handler {
         let connector = HttpsConnector::new(ssl);
         let client = hyper::Client::with_connector(connector);
         let ditherer = Ditherer::from_str("floyd")?;
-        Ok(Self { client, ditherer })
+        let (printer, receiver) = mpsc::channel();
+        std::thread::spawn(move || log_result(printer_thread(receiver)));
+        Ok(Self {
+            client,
+            ditherer,
+            printer,
+        })
     }
 
     pub fn handle(&mut self, message: Message) -> Result<()> {
@@ -64,7 +90,9 @@ impl Handler {
             let image = image::RgbImage::from_raw(width, height, image.raw_buf())
                 .context("Could not convert back to a regular image")?;
 
-            image.save("test.png")?;
+            // Send image to the printer thread
+            // NOTE: This is a fatal error; the expect is intentional!
+            self.printer.send(image).expect("Printer thread died"); 
         }
         Ok(())
     }
@@ -91,20 +119,6 @@ fn main() -> Result<()> {
         match connection.recv_event() {
             Ok(Event::MessageCreate(message)) => {
                 log_result(handler.handle(message));
-
-                /*
-                if message.content == "!test" {
-                    let _ = discord.send_message(
-                        message.channel_id,
-                        "This is a reply to the test.",
-                        "",
-                        false,
-                    );
-                } else if message.content == "!quit" {
-                    println!("Quitting.");
-                    break;
-                }
-                */
             }
             Ok(_) => {}
             Err(discord::Error::Closed(code, body)) => {

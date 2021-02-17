@@ -103,6 +103,12 @@ impl Handler {
             return Ok(());
         }
 
+        // Check to see if there's anything to do
+        let text = message.content.trim_start_matches("!print").trim_start();
+        if text.is_empty() && message.attachments.is_empty() {
+            return Ok(());
+        }
+
         // Message header
         let author = message.author.name;
         let date = message.timestamp.format("%m/%d/%y %H:%M");
@@ -118,8 +124,7 @@ impl Handler {
 
         self.print_text(header);
 
-        // Text printing
-        let text = message.content.trim_start_matches("!print ");
+        // Message body printing
         if !text.is_empty() {
             match validate_url(text) {
                 Some(url) => self.print_image(url)?,
@@ -163,7 +168,10 @@ impl Handler {
             .read_to_end(&mut buf)
             .context("Image read failed")?;
         if buf.len() as u64 == MAX_DOWNLOAD_SIZE {
-            error!("Attachment size reached maximum download size, {} bytes", MAX_DOWNLOAD_SIZE);
+            error!(
+                "Attachment size reached maximum download size, {} bytes",
+                MAX_DOWNLOAD_SIZE
+            );
         }
 
         // Decode the image
@@ -282,7 +290,10 @@ mod tests {
     #[test]
     fn test_url_validation() {
         assert_eq!(validate_url("https://fuck.com"), None);
-        assert_eq!(validate_url("https://fuck.com/wat.png"), Some(Url::parse("https://fuck.com/wat.png").unwrap()));
+        assert_eq!(
+            validate_url("https://fuck.com/wat.png"),
+            Some(Url::parse("https://fuck.com/wat.png").unwrap())
+        );
         assert_eq!(validate_url("https://fuck.com/wat.html"), None);
         assert_eq!(validate_url("wat.png"), None);
     }

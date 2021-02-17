@@ -3,8 +3,10 @@ use discord::model::Event;
 use discord::{model::Message, Discord};
 use dither::prelude::*;
 use escposify::{img::Image as EscImage, printer::Printer};
+use hyper::client::IntoUrl;
 use hyper::net::HttpsConnector;
 use hyper::Client;
+use hyper::Url;
 use hyper_native_tls::NativeTlsClient;
 use image::GenericImageView;
 use log::{error, info, LevelFilter};
@@ -17,6 +19,8 @@ use std::thread;
 
 const PRINTER_CHARS_PER_LINE: usize = 32;
 const PRINTER_DOTS_PER_LINE: u32 = 384;
+const MAX_DOWNLOAD_SIZE: u64 = 1024 * 1024 * 8; // 8MB
+//const MAX_DOWNLOAD_SIZE: u64 = 1024; // 8MB
 
 /// Message handling service
 struct Handler {
@@ -96,84 +100,123 @@ impl Handler {
         if !message.content.starts_with("!print") && !message.author.bot {
             return Ok(());
         }
+
         // Message header
         let author = message.author.name;
         let date = message.timestamp.format("%m/%d/%y %H:%M");
-        info!("Handling a new message from {}#{}", author, message.author.discriminator);
+        info!(
+            "Handling a new message from {}#{}",
+            author, message.author.discriminator
+        );
         let full_date = format!("{} {}:", author, date);
         let header = match full_date.chars().count() > PRINTER_CHARS_PER_LINE {
             true => format!("{}: ", author),
             false => full_date,
         };
 
-        fatal_error(
-            self.printer
-                .send(PrinterMsg::Text(header))
-                .context("Printer thread died"),
-        );
+        self.print_text(header);
 
         // Text printing
-        let text = message.content.trim_start_matches("!print").trim_start();
+        let text = message.content.trim_start_matches("!print ");
         if !text.is_empty() {
-            fatal_error(
-                self.printer
-                    .send(PrinterMsg::Text(text.into()))
-                    .context("Printer thread died"),
-            );
+            match validate_url(text) {
+                Some(url) => self.print_image(url)?,
+                None => self.print_text(text.into()),
+            }
         }
 
         // Image printing
         for att in message.attachments {
-            // Download the image
-            let mut image = self
-                .client
-                .get(&att.url)
-                .send()
-                .context("Image download failed")?;
-
-            // Read the image into local memory
-            let mut buf = Vec::new();
-            image.read_to_end(&mut buf).context("Image read failed")?;
-
-            // Decode the image
-            let image = image::load_from_memory(&buf).context("Image parse failed")?;
-
-            // Resize to fit the printer
-            let image = image.resize(
-                PRINTER_DOTS_PER_LINE,
-                9000,
-                image::imageops::FilterType::Triangle,
-            );
-
-            // Convert to the ditherer's image format
-            let image: Img<RGB<f64>> = Img::new(
-                image.to_rgb8().pixels().map(|p| RGB::from(p.0)),
-                image.width(),
-            )
-            .context("Image convert failed")?;
-
-            // Dither the image
-            let quantize = dither::create_quantize_n_bits_func(1)?;
-            let image = image.convert_with(|rgb| rgb.to_chroma_corrected_black_and_white());
-            let image = self
-                .ditherer
-                .dither(image, quantize)
-                .convert_with(RGB::from_chroma_corrected_black_and_white);
-
-            // Convert image back to normal...
-            let (width, height) = image.size();
-            let image = image::RgbImage::from_raw(width, height, image.raw_buf())
-                .context("Could not convert back to a regular image")?;
-
-            // Send image to the printer thread
-            // NOTE: This is a fatal error; the expect is intentional!
-            fatal_error(
-                self.printer
-                    .send(PrinterMsg::Image(image))
-                    .context("Printer thread died"),
-            );
+            if att.dimensions().is_some() {
+                if let Some(url) = validate_url(&att.url) {
+                    self.print_image(url)?;
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Print some text
+    fn print_text(&self, text: String) {
+        fatal_error(
+            self.printer
+                .send(PrinterMsg::Text(text))
+                .context("Printer thread died"),
+        );
+    }
+
+    /// Download and print some image
+    fn print_image(&self, url: Url) -> Result<()> {
+        // Download the image
+        let image = self
+            .client
+            .get(url)
+            .send()
+            .context("Image download failed")?;
+
+        // Read the image into local memory
+        let mut buf = Vec::new();
+        image
+            .take(MAX_DOWNLOAD_SIZE)
+            .read_to_end(&mut buf)
+            .context("Image read failed")?;
+        if buf.len() as u64 == MAX_DOWNLOAD_SIZE {
+            error!("Attachment size reached maximum download size, {} bytes", MAX_DOWNLOAD_SIZE);
+        }
+
+        // Decode the image
+        let image = image::load_from_memory(&buf).context("Image parse failed")?;
+
+        // Resize to fit the printer
+        let image = image.resize(
+            PRINTER_DOTS_PER_LINE,
+            9000,
+            image::imageops::FilterType::Triangle,
+        );
+
+        // Convert to the ditherer's image format
+        let image: Img<RGB<f64>> = Img::new(
+            image.to_rgb8().pixels().map(|p| RGB::from(p.0)),
+            image.width(),
+        )
+        .context("Image convert failed")?;
+
+        // Dither the image
+        let quantize = dither::create_quantize_n_bits_func(1)?;
+        let image = image.convert_with(|rgb| rgb.to_chroma_corrected_black_and_white());
+        let image = self
+            .ditherer
+            .dither(image, quantize)
+            .convert_with(RGB::from_chroma_corrected_black_and_white);
+
+        // Convert image back to normal...
+        let (width, height) = image.size();
+        let image = image::RgbImage::from_raw(width, height, image.raw_buf())
+            .context("Could not convert back to a regular image")?;
+
+        // Send image to the printer thread
+        // NOTE: This is a fatal error; the expect is intentional!
+        fatal_error(
+            self.printer
+                .send(PrinterMsg::Image(image))
+                .context("Printer thread died"),
+        );
+
+        Ok(())
+    }
+}
+
+/// Check if this is a valid image URL
+fn validate_url(s: impl IntoUrl) -> Option<Url> {
+    let url = s.into_url().ok()?;
+    let file_name = url.path_segments()?.last()?;
+    let file_extension = file_name.split('.').last()?;
+
+    // https://discord.com/developers/docs/reference
+    const VALID_EXTENSIONS: [&str; 5] = ["gif", "png", "webp", "jpeg", "jpg"];
+    match VALID_EXTENSIONS.contains(&file_extension) {
+        true => Some(url),
+        false => None,
     }
 }
 

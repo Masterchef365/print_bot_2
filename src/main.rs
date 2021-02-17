@@ -18,30 +18,36 @@ use std::thread;
 const PRINTER_CHARS_PER_LINE: usize = 32;
 const PRINTER_DOTS_PER_LINE: u32 = 384;
 
+/// Message handling service
 struct Handler {
     client: Client,
     ditherer: Ditherer<'static>,
     printer: Sender<PrinterMsg>,
 }
 
+/// Message from discord thread to printer thread
 enum PrinterMsg {
     Image(image::RgbImage),
     Text(String),
 }
 
+/// Printer thread is seperate from Discord thread to prevent blockage
 fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
     info!("Starting printer thread...");
-    use std::io::Write;
-    std::io::stdout().flush()?;
+
+    // Device init
     let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
     let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(1))
         .context("Failed to connect to printer")?;
     let mut printer = Printer::new(&mut device, None, None);
+
+    // Welcome message
     printer
         .chain_align("ct")?
         .chain_println("Welcome to Discord!\n\n\n\n")?
         .flush()?;
 
+    // Main print loop
     info!("Printer thread initialized!");
     while let Ok(msg) = receiver.recv() {
         match msg {
@@ -64,13 +70,19 @@ fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
 }
 
 impl Handler {
+    /// Create a new handler
     pub fn new() -> Result<Self> {
+        // Hyper client
         let ssl = NativeTlsClient::new()?;
         let connector = HttpsConnector::new(ssl);
         let client = hyper::Client::with_connector(connector);
-        let ditherer = Ditherer::from_str("floyd")?;
+
+        // Channel for Discord <-> printer thread communication
         let (printer, receiver) = mpsc::channel();
         thread::spawn(move || log_result(printer_thread(receiver)));
+
+        let ditherer = Ditherer::from_str("floyd")?;
+
         Ok(Self {
             client,
             ditherer,
@@ -78,14 +90,16 @@ impl Handler {
         })
     }
 
+    /// Handle a received message
     pub fn handle(&mut self, message: Message) -> Result<()> {
-        if !message.content.starts_with("!print") {
+        // Check if we are activated
+        if !message.content.starts_with("!print") && !message.author.bot {
             return Ok(());
         }
-
         // Message header
         let author = message.author.name;
         let date = message.timestamp.format("%m/%d/%y %H:%M");
+        info!("Handling a new message from {}#{}", author, message.author.discriminator);
         let full_date = format!("{} {}:", author, date);
         let header = match full_date.chars().count() > PRINTER_CHARS_PER_LINE {
             true => format!("{}: ", author),
@@ -163,12 +177,14 @@ impl Handler {
     }
 }
 
+/// Log a result as an error
 fn log_result(res: Result<()>) {
     if let Err(e) = res {
         error!("Error: {:#}", e);
     }
 }
 
+/// Log a fatal error and panic
 fn fatal_error(res: Result<()>) {
     if res.is_err() {
         log_result(res);

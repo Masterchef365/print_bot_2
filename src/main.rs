@@ -18,6 +18,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 // Settings
+const HELP_COMMAND: &str = "!help";
+const PRINT_COMMAND: &str = "!print";
 const MAX_DOWNLOAD_SIZE: u64 = 1024 * 1024 * 8; // 8MB
 
 // Printer constants
@@ -25,7 +27,7 @@ const PRINTER_CHARS_PER_LINE: usize = 32;
 const PRINTER_DOTS_PER_LINE: u32 = 384;
 
 /// Message handling service
-struct Handler {
+struct PrintHandler {
     client: Client,
     ditherer: Ditherer<'static>,
     printer: Sender<PrinterMsg>,
@@ -50,7 +52,7 @@ fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
     // Welcome message
     printer
         .chain_align("ct")?
-        .chain_println("Welcome to Discord!\n\n\n\n")?
+        .chain_println(PRINTER_WELCOME)?
         .flush()?;
 
     // Main print loop
@@ -75,7 +77,7 @@ fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
     Ok(())
 }
 
-impl Handler {
+impl PrintHandler {
     /// Create a new handler
     pub fn new() -> Result<Self> {
         // Hyper client
@@ -96,15 +98,10 @@ impl Handler {
         })
     }
 
-    /// Handle a received message
-    pub fn handle(&mut self, message: Message) -> Result<()> {
-        // Check if we are activated
-        if !message.content.starts_with("!print") && !message.author.bot {
-            return Ok(());
-        }
-
+    /// Handle a printing command
+    pub fn handle_print_request(&mut self, message: Message) -> Result<()> {
         // Check to see if there's anything to do
-        let text = message.content.trim_start_matches("!print").trim_start();
+        let text = message.content.trim_start_matches(PRINT_COMMAND).trim_start();
         if text.is_empty() && message.attachments.is_empty() {
             return Ok(());
         }
@@ -255,7 +252,7 @@ fn main() -> Result<()> {
         .context("Expected token in DISCORD_TOKEN environment variable.")?;
 
     // Set up printer concurrently with logging into Discord
-    let handler = thread::spawn(|| Handler::new().map_err(|e| e.to_string()));
+    let handler = thread::spawn(|| PrintHandler::new().map_err(|e| e.to_string()));
 
     // Log in to Discord using a bot token from the environment
     info!("Logging into discord");
@@ -270,7 +267,25 @@ fn main() -> Result<()> {
     loop {
         match connection.recv_event() {
             Ok(Event::MessageCreate(message)) => {
-                log_result(handler.handle(message));
+                // No bots!
+                if message.author.bot {
+                    continue;
+                }
+
+                // Parse command from message
+                let cmd = match message.content.split_whitespace().last() {
+                    Some(cmd) => cmd,
+                    None => continue,
+                };
+
+                // Run command
+                match cmd {
+                    PRINT_COMMAND => log_result(handler.handle_print_request(message)),
+                    HELP_COMMAND => {
+                        discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
+                    }
+                    _ => (),
+                }
             }
             Ok(_) => {}
             Err(discord::Error::Closed(code, body)) => {
@@ -282,6 +297,18 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
+
+const HELP_TEXT: &str = "
+**Segfault's printer bot**\n
+This bot uses a receipt printer to print your messages immediately after they have been received. Printer paper is extra super cheap, but remember that whatever you do print is waste.
+If this command works, the printer _should_ be running. Have fun!
+
+__Commands__:
+`!print`: Print text or an image URL following this command, or attached images.
+`!help`: Print this message
+";
+
+const PRINTER_WELCOME: &str = "Welcome to Discord!\n\n\n\n";
 
 #[cfg(test)]
 mod tests {

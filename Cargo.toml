@@ -12,6 +12,8 @@ anyhow = "1"
 dither = "1.3"
 escposify = "0.4"
 libusb = "0.3"
+log = "0.4"
+simple-logging = "2.0"
 
 #pos58_usb = { path = "../pos58_usb" }
 [dependencies.pos58_usb]

@@ -7,12 +7,16 @@ use hyper::net::HttpsConnector;
 use hyper::Client;
 use hyper_native_tls::NativeTlsClient;
 use image::GenericImageView;
+use log::{error, info, LevelFilter};
 use pos58_usb::POS58USB;
 use std::env;
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+
+const PRINTER_CHARS_PER_LINE: usize = 32;
+const PRINTER_DOTS_PER_LINE: u32 = 384;
 
 struct Handler {
     client: Client,
@@ -26,7 +30,7 @@ enum PrinterMsg {
 }
 
 fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
-    println!("Starting printer thread...");
+    info!("Starting printer thread...");
     use std::io::Write;
     std::io::stdout().flush()?;
     let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
@@ -38,7 +42,7 @@ fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
         .chain_println("Welcome to Discord!\n\n\n\n")?
         .flush()?;
 
-    println!("Printer thread initialized!");
+    info!("Printer thread initialized!");
     while let Ok(msg) = receiver.recv() {
         match msg {
             PrinterMsg::Image(image) => {
@@ -49,13 +53,13 @@ fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
                     .flush()?;
             }
             PrinterMsg::Text(text) => {
-                printer.chain_align("lt")?
-                    .chain_println(&text)?
-                    .flush()?;
+                printer.chain_align("lt")?.chain_println(&text)?.flush()?;
             }
         }
     }
-    eprintln!("Note: printer thread stopped.");
+
+    error!("Printer thread stopped.");
+
     Ok(())
 }
 
@@ -79,18 +83,29 @@ impl Handler {
             return Ok(());
         }
 
-        // Name print
+        // Message header
         let author = message.author.name;
-        self.printer
-            .send(PrinterMsg::Text(format!("{}:", author)))
-            .expect("Printer thread died");
+        let date = message.timestamp.format("%m/%d/%y %H:%M");
+        let full_date = format!("{} {}:", author, date);
+        let header = match full_date.chars().count() > PRINTER_CHARS_PER_LINE {
+            true => format!("{}: ", author),
+            false => full_date,
+        };
+
+        fatal_error(
+            self.printer
+                .send(PrinterMsg::Text(header))
+                .context("Printer thread died"),
+        );
 
         // Text printing
         let text = message.content.trim_start_matches("!print").trim_start();
         if !text.is_empty() {
-            self.printer
-                .send(PrinterMsg::Text(text.into()))
-                .expect("Printer thread died");
+            fatal_error(
+                self.printer
+                    .send(PrinterMsg::Text(text.into()))
+                    .context("Printer thread died"),
+            );
         }
 
         // Image printing
@@ -110,7 +125,6 @@ impl Handler {
             let image = image::load_from_memory(&buf).context("Image parse failed")?;
 
             // Resize to fit the printer
-            const PRINTER_DOTS_PER_LINE: u32 = 384;
             let image = image.resize(
                 PRINTER_DOTS_PER_LINE,
                 9000,
@@ -139,9 +153,11 @@ impl Handler {
 
             // Send image to the printer thread
             // NOTE: This is a fatal error; the expect is intentional!
-            self.printer
-                .send(PrinterMsg::Image(image))
-                .expect("Printer thread died");
+            fatal_error(
+                self.printer
+                    .send(PrinterMsg::Image(image))
+                    .context("Printer thread died"),
+            );
         }
         Ok(())
     }
@@ -149,24 +165,39 @@ impl Handler {
 
 fn log_result(res: Result<()>) {
     if let Err(e) = res {
-        println!("Error: {:#}", e);
+        error!("Error: {:#}", e);
+    }
+}
+
+fn fatal_error(res: Result<()>) {
+    if res.is_err() {
+        log_result(res);
+        panic!("Fatal error");
     }
 }
 
 fn main() -> Result<()> {
+    // Set up logging
+    let log_path = env::var("PRINTER_LOG_PATH").unwrap_or_else(|_| "print_bot.log".into());
+    simple_logging::log_to_file(log_path, LevelFilter::Info)?;
+
+    // Arguments
+    let token = env::var("DISCORD_TOKEN")
+        .context("Expected token in DISCORD_TOKEN environment variable.")?;
+
+    // Set up printer concurrently with logging into Discord
     let handler = thread::spawn(|| Handler::new().map_err(|e| e.to_string()));
 
     // Log in to Discord using a bot token from the environment
-    println!("Logging into discord");
-    let discord = Discord::from_bot_token(&env::var("DISCORD_TOKEN").context("Expected token")?)
-        .context("login failed")?;
+    info!("Logging into discord");
+    let discord = Discord::from_bot_token(&token).context("login failed")?;
 
     let mut handler = handler.join().unwrap().unwrap();
 
     // Establish and use a websocket connection
     let (mut connection, _) = discord.connect().context("connect failed")?;
 
-    println!("Ready.");
+    info!("Ready.");
     loop {
         match connection.recv_event() {
             Ok(Event::MessageCreate(message)) => {
@@ -174,10 +205,10 @@ fn main() -> Result<()> {
             }
             Ok(_) => {}
             Err(discord::Error::Closed(code, body)) => {
-                println!("Gateway closed on us with code {:?}: {}", code, body);
+                error!("Gateway closed on us with code {:?}: {}", code, body);
                 break;
             }
-            Err(err) => println!("Receive error: {:?}", err),
+            Err(err) => error!("Receive error: {:?}", err),
         }
     }
     Ok(())

@@ -273,7 +273,7 @@ fn main() -> Result<()> {
                 }
 
                 // Parse command from message
-                let cmd = match message.content.split_whitespace().last() {
+                let cmd = match message.content.split_whitespace().next() {
                     Some(cmd) => cmd,
                     None => continue,
                 };
@@ -300,7 +300,7 @@ fn main() -> Result<()> {
 
 const HELP_TEXT: &str = "
 **Segfault's printer bot**\n
-This bot uses a receipt printer to print your messages immediately after they have been received. Printer paper is extra super cheap, but remember that whatever you do print is waste.
+This bot uses a receipt printer to immortalize your messages on 58mm thermal paper. Printer paper is extra super cheap, but remember that whatever you do print is waste.
 If this command works, the printer _should_ be running. Have fun!
 
 __Commands__:

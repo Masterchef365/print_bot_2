@@ -127,6 +127,7 @@ fn main() -> Result<()> {
                 // Run command
                 match cmd {
                     PRINT_COMMAND => {
+                        info!("{}#{} began a print job.", message.author.name, message.author.discriminator);
                         if let Some(handler) = &mut print_handler {
                             log_result(handler.handle_print_request(message));
                         } else {
@@ -138,6 +139,7 @@ fn main() -> Result<()> {
                     }
                     SHOW_COMMAND => match stream.next() {
                         Ok((buf, _)) => {
+                            info!("{}#{} took a picture.", message.author.name, message.author.discriminator);
                             discord
                                 .send_file(message.channel_id, "", buf, "image.jpg")
                                 .context("Failed to send image file!")?;
@@ -169,7 +171,7 @@ If this command works, the printer _should_ be running. Have fun!
 __Commands__:
 `!print`: Print text or an image URL following this command, or attached images.
 `!help`: Print this message
-`!show`: Take a picture of the printer, and show it here.
+`!showme`: Take a picture of the printer, and show it here.
 ";
 
 const SORRY_PRINTER: &str = "Sorry, the printer has been disabled for now :(";

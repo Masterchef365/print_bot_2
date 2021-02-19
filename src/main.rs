@@ -1,241 +1,47 @@
 use anyhow::{Context, Result};
 use discord::model::Event;
-use discord::{model::Message, Discord};
-use dither::prelude::*;
-use escposify::{img::Image as EscImage, printer::Printer};
-use hyper::client::IntoUrl;
-use hyper::net::HttpsConnector;
-use hyper::Client;
-use hyper::Url;
-use hyper_native_tls::NativeTlsClient;
-use image::GenericImageView;
+use discord::Discord;
 use log::{error, info, LevelFilter};
-use pos58_usb::POS58USB;
 use std::env;
-use std::io::Read;
-use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::path::PathBuf;
 use std::thread;
+use structopt::StructOpt;
+
+mod printer;
+use printer::PrintHandler;
+mod camera;
+use camera::CameraHandler;
+
+#[derive(Debug, StructOpt)]
+#[structopt(name = "example", about = "An example of StructOpt usage.")]
+struct Opt {
+    /// Disable the camera
+    #[structopt(long)]
+    disable_camera: bool,
+
+    /// Disable the printer
+    #[structopt(long)]
+    disable_printer: bool,
+
+    /// Logging path
+    #[structopt(long, default_value = "print_bot.log")]
+    log_path: PathBuf,
+}
 
 // Settings
-const HELP_COMMAND: &str = "!help";
-const PRINT_COMMAND: &str = "!print";
-const MAX_DOWNLOAD_SIZE: u64 = 1024 * 1024 * 8; // 8MB
-
-// Printer constants
-const PRINTER_CHARS_PER_LINE: usize = 32;
-const PRINTER_DOTS_PER_LINE: u32 = 384;
-
-/// Message handling service
-struct PrintHandler {
-    client: Client,
-    ditherer: Ditherer<'static>,
-    printer: Sender<PrinterMsg>,
-}
-
-/// Message from discord thread to printer thread
-enum PrinterMsg {
-    Image(image::RgbImage),
-    Text(String),
-}
-
-/// Printer thread is seperate from Discord thread to prevent blockage
-fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
-    info!("Starting printer thread...");
-
-    // Device init
-    let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
-    let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(1))
-        .context("Failed to connect to printer")?;
-    let mut printer = Printer::new(&mut device, None, None);
-
-    // Welcome message
-    printer
-        .chain_align("ct")?
-        .chain_println(PRINTER_WELCOME)?
-        .flush()?;
-
-    // Main print loop
-    info!("Printer thread initialized!");
-    while let Ok(msg) = receiver.recv() {
-        match msg {
-            PrinterMsg::Image(image) => {
-                let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
-                printer
-                    .chain_align("ct")?
-                    .chain_bit_image(&image, None)?
-                    .flush()?;
-            }
-            PrinterMsg::Text(text) => {
-                printer.chain_align("lt")?.chain_println(&text)?.flush()?;
-            }
-        }
-    }
-
-    error!("Printer thread stopped.");
-
-    Ok(())
-}
-
-impl PrintHandler {
-    /// Create a new handler
-    pub fn new() -> Result<Self> {
-        // Hyper client
-        let ssl = NativeTlsClient::new()?;
-        let connector = HttpsConnector::new(ssl);
-        let client = hyper::Client::with_connector(connector);
-
-        // Channel for Discord <-> printer thread communication
-        let (printer, receiver) = mpsc::channel();
-        thread::spawn(move || log_result(printer_thread(receiver)));
-
-        let ditherer = Ditherer::from_str("floyd")?;
-
-        Ok(Self {
-            client,
-            ditherer,
-            printer,
-        })
-    }
-
-    /// Handle a printing command
-    pub fn handle_print_request(&mut self, message: Message) -> Result<()> {
-        // Check to see if there's anything to do
-        let text = message.content.trim_start_matches(PRINT_COMMAND).trim_start();
-        if text.is_empty() && message.attachments.is_empty() {
-            return Ok(());
-        }
-
-        // Message header
-        let author = message.author.name;
-        let date = message.timestamp.format("%m/%d/%y %H:%M");
-        info!(
-            "Handling a new message from {}#{}",
-            author, message.author.discriminator
-        );
-        let full_date = format!("{} {}:", author, date);
-        let header = match full_date.chars().count() > PRINTER_CHARS_PER_LINE {
-            true => format!("{}: ", author),
-            false => full_date,
-        };
-
-        self.print_text(header);
-
-        // Message body printing
-        if !text.is_empty() {
-            match validate_url(text) {
-                Some(url) => self.print_image(url)?,
-                None => self.print_text(text.into()),
-            }
-        }
-
-        // Image printing
-        for att in message.attachments {
-            if att.dimensions().is_some() {
-                if let Some(url) = validate_url(&att.url) {
-                    self.print_image(url)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Print some text
-    fn print_text(&self, text: String) {
-        fatal_error(
-            self.printer
-                .send(PrinterMsg::Text(text))
-                .context("Printer thread died"),
-        );
-    }
-
-    /// Download and print some image
-    fn print_image(&self, url: Url) -> Result<()> {
-        // Download the image
-        let image = self
-            .client
-            .get(url)
-            .send()
-            .context("Image download failed")?;
-
-        // Read the image into local memory
-        let mut buf = Vec::new();
-        image
-            .take(MAX_DOWNLOAD_SIZE)
-            .read_to_end(&mut buf)
-            .context("Image read failed")?;
-        if buf.len() as u64 == MAX_DOWNLOAD_SIZE {
-            error!(
-                "Attachment size reached maximum download size, {} bytes",
-                MAX_DOWNLOAD_SIZE
-            );
-        }
-
-        // Decode the image
-        let image = image::load_from_memory(&buf).context("Image parse failed")?;
-
-        // Resize to fit the printer
-        let image = image.resize(
-            PRINTER_DOTS_PER_LINE,
-            9000,
-            image::imageops::FilterType::Triangle,
-        );
-
-        // Convert to the ditherer's image format
-        let image: Img<RGB<f64>> = Img::new(
-            image.to_rgb8().pixels().map(|p| RGB::from(p.0)),
-            image.width(),
-        )
-        .context("Image convert failed")?;
-
-        // Dither the image
-        let quantize = dither::create_quantize_n_bits_func(1)?;
-        let image = image.convert_with(|rgb| rgb.to_chroma_corrected_black_and_white());
-        let image = self
-            .ditherer
-            .dither(image, quantize)
-            .convert_with(RGB::from_chroma_corrected_black_and_white);
-
-        // Convert image back to normal...
-        let (width, height) = image.size();
-        let image = image::RgbImage::from_raw(width, height, image.raw_buf())
-            .context("Could not convert back to a regular image")?;
-
-        // Send image to the printer thread
-        // NOTE: This is a fatal error; the expect is intentional!
-        fatal_error(
-            self.printer
-                .send(PrinterMsg::Image(image))
-                .context("Printer thread died"),
-        );
-
-        Ok(())
-    }
-}
-
-/// Check if this is a valid image URL
-fn validate_url(s: impl IntoUrl) -> Option<Url> {
-    let url = s.into_url().ok()?;
-    let file_name = url.path_segments()?.last()?;
-    let file_extension = file_name.split('.').last()?;
-
-    // https://discord.com/developers/docs/reference
-    const VALID_EXTENSIONS: [&str; 5] = ["gif", "png", "webp", "jpeg", "jpg"];
-    match VALID_EXTENSIONS.contains(&file_extension) {
-        true => Some(url),
-        false => None,
-    }
-}
+pub const HELP_COMMAND: &str = "!help";
+pub const PRINT_COMMAND: &str = "!print";
+pub const SHOW_COMMAND: &str = "!showme";
 
 /// Log a result as an error
-fn log_result(res: Result<()>) {
+pub fn log_result(res: Result<()>) {
     if let Err(e) = res {
         error!("Error: {:#}", e);
     }
 }
 
 /// Log a fatal error and panic
-fn fatal_error(res: Result<()>) {
+pub fn fatal_error(res: Result<()>) {
     if res.is_err() {
         log_result(res);
         panic!("Fatal error");
@@ -243,22 +49,30 @@ fn fatal_error(res: Result<()>) {
 }
 
 fn main() -> Result<()> {
+    // Arg parsing
+    let opt = Opt::from_args();
+
     // Set up logging
-    let log_path = env::var("PRINTER_LOG_PATH").unwrap_or_else(|_| "print_bot.log".into());
-    simple_logging::log_to_file(log_path, LevelFilter::Info)?;
+    simple_logging::log_to_file(opt.log_path, LevelFilter::Info)?;
 
     // Arguments
     let token = env::var("DISCORD_TOKEN")
         .context("Expected token in DISCORD_TOKEN environment variable.")?;
 
     // Set up printer concurrently with logging into Discord
-    let handler = thread::spawn(|| PrintHandler::new().map_err(|e| e.to_string()));
+    let print_handler = if opt.disable_printer {
+        None
+    } else {
+        Some(thread::spawn(|| {
+            PrintHandler::new().map_err(|e| e.to_string())
+        }))
+    };
 
     // Log in to Discord using a bot token from the environment
     info!("Logging into discord");
     let discord = Discord::from_bot_token(&token).context("login failed")?;
 
-    let mut handler = handler.join().unwrap().unwrap();
+    let mut print_handler = print_handler.map(|p| p.join().unwrap().unwrap());
 
     // Establish and use a websocket connection
     let (mut connection, _) = discord.connect().context("connect failed")?;
@@ -280,9 +94,17 @@ fn main() -> Result<()> {
 
                 // Run command
                 match cmd {
-                    PRINT_COMMAND => log_result(handler.handle_print_request(message)),
+                    PRINT_COMMAND => {
+                        if let Some(handler) = &mut print_handler {
+                            log_result(handler.handle_print_request(message));
+                        } else {
+                            discord.send_message(message.channel_id, SORRY_PRINTER, "", false)?;
+                        }
+                    }
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
+                    }
+                    SHOW_COMMAND => {
                     }
                     _ => (),
                 }
@@ -306,22 +128,7 @@ If this command works, the printer _should_ be running. Have fun!
 __Commands__:
 `!print`: Print text or an image URL following this command, or attached images.
 `!help`: Print this message
+`!show`: Take a picture of the printer, and show it here.
 ";
 
-const PRINTER_WELCOME: &str = "Welcome to Discord!\n\n\n\n";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_url_validation() {
-        assert_eq!(validate_url("https://fuck.com"), None);
-        assert_eq!(
-            validate_url("https://fuck.com/wat.png"),
-            Some(Url::parse("https://fuck.com/wat.png").unwrap())
-        );
-        assert_eq!(validate_url("https://fuck.com/wat.html"), None);
-        assert_eq!(validate_url("wat.png"), None);
-    }
-}
+const SORRY_PRINTER: &str = "Sorry, the printer has been disabled for now :(";

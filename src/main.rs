@@ -7,10 +7,17 @@ use std::path::PathBuf;
 use std::thread;
 use structopt::StructOpt;
 
+use v4l::buffer::Type;
+use v4l::io::mmap::Stream;
+use v4l::io::traits::CaptureStream;
+use v4l::video::Capture;
+use v4l::Device;
+use v4l::FourCC;
+
 mod printer;
 use printer::PrintHandler;
-mod camera;
-use camera::CameraHandler;
+//mod camera;
+//use camera::CameraHandler;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
@@ -72,10 +79,30 @@ fn main() -> Result<()> {
     info!("Logging into discord");
     let discord = Discord::from_bot_token(&token).context("login failed")?;
 
+    // Wait for the print handler...
     let mut print_handler = print_handler.map(|p| p.join().unwrap().unwrap());
 
     // Establish and use a websocket connection
     let (mut connection, _) = discord.connect().context("connect failed")?;
+
+    // ################# CAMERA ######################
+
+    // Create a new capture device with a few extra parameters
+    let mut dev = Device::new(0).expect("Failed to open device");
+
+    // Let's say we want to explicitly request another format
+    let mut fmt = dev.format().expect("Failed to read format");
+    fmt.width = 1280;
+    fmt.height = 720;
+    fmt.fourcc = FourCC::new(b"MJPG");
+    dev.set_format(&fmt).expect("Failed to write format");
+
+    // Create the stream, which will internally 'allocate' (as in map) the
+    // number of requested buffers for us.
+    let mut stream = Stream::with_buffers(&mut dev, Type::VideoCapture, 4)
+        .expect("Failed to create buffer stream");
+
+    // ###############################################
 
     info!("Ready.");
     loop {
@@ -104,8 +131,17 @@ fn main() -> Result<()> {
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
                     }
-                    SHOW_COMMAND => {
-                    }
+                    SHOW_COMMAND => match stream.next() {
+                        Ok((buf, _)) => {
+                            discord
+                                .send_file(message.channel_id, "", buf, "image.jpg")
+                                .context("Failed to send image file!")?;
+                        }
+                        Err(e) => {
+                            error!("Printer error: {}", e);
+                            discord.send_message(message.channel_id, SORRY_CAMERA, "", false)?;
+                        }
+                    },
                     _ => (),
                 }
             }
@@ -132,3 +168,4 @@ __Commands__:
 ";
 
 const SORRY_PRINTER: &str = "Sorry, the printer has been disabled for now :(";
+const SORRY_CAMERA: &str = "Sorry, the camera has been disabled for now :(";

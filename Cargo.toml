@@ -15,6 +15,7 @@ libusb = "0.3"
 log = "0.4"
 simple-logging = "2.0"
 structopt = { version = "0.3", default-features = false }
+v4l = "0.12"
 
 #pos58_usb = { path = "../pos58_usb" }
 [dependencies.pos58_usb]

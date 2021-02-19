@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{format_err, Context, Result};
 use discord::model::Event;
 use discord::Discord;
 use log::{error, info, LevelFilter};
@@ -86,26 +86,39 @@ fn main() -> Result<()> {
     // ################# CAMERA ######################
 
     // Create a new capture device with a few extra parameters
-    let mut dev = Device::new(0).expect("Failed to open device");
+    let mut dev = (!opt.disable_camera)
+        .then(|| -> Result<Device> {
+            let dev = Device::new(0).context("Open device")?;
 
-    // Let's say we want to explicitly request another format
-    let mut fmt = dev.format().expect("Failed to read format");
-    fmt.width = 1280;
-    fmt.height = 720;
-    fmt.fourcc = FourCC::new(b"MJPG");
-    dev.set_format(&fmt).expect("Failed to write format");
+            // Let's say we want to explicitly request another format
+            let mut fmt = dev.format().context("Read format")?;
+            fmt.width = 1280;
+            fmt.height = 720;
+            fmt.fourcc = FourCC::new(b"MJPG");
+            dev.set_format(&fmt).context("Write format")?;
+            Ok(dev)
+        })
+        .transpose()
+        .context("Failed to open camear")?;
 
     // Create the stream, which will internally 'allocate' (as in map) the
     // number of requested buffers for us.
-    let mut stream = Stream::with_buffers(&mut dev, Type::VideoCapture, 4)
-        .expect("Failed to create buffer stream");
+    let mut stream = dev
+        .as_mut()
+        .map(|dev| -> Result<Stream> {
+            let mut stream = Stream::with_buffers(dev, Type::VideoCapture, 4)
+                .context("Failed to create buffer stream")?;
 
-    // Prime the camera
-    let steps = 10;
-    for i in 1..=steps {
-        info!("Priming the camera {}/{}", i, steps);
-        stream.next()?;
-    }
+            // Prime the camera
+            let steps = 5;
+            for i in 1..=steps {
+                info!("Priming the camera {}/{}", i, steps);
+                stream.next()?;
+            }
+
+            Ok(stream)
+        })
+        .transpose()?;
 
     // ###############################################
 
@@ -127,7 +140,10 @@ fn main() -> Result<()> {
                 // Run command
                 match cmd {
                     PRINT_COMMAND => {
-                        info!("{}#{} began a print job.", message.author.name, message.author.discriminator);
+                        info!(
+                            "{}#{} began a print job.",
+                            message.author.name, message.author.discriminator
+                        );
                         if let Some(handler) = &mut print_handler {
                             log_result(handler.handle_print_request(message));
                         } else {
@@ -137,9 +153,16 @@ fn main() -> Result<()> {
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
                     }
-                    SHOW_COMMAND => match stream.next() {
+                    SHOW_COMMAND => match stream
+                        .as_mut()
+                        .ok_or_else(|| format_err!("Camera not set up"))
+                        .and_then(|s| Ok(s.next()?))
+                    {
                         Ok((buf, _)) => {
-                            info!("{}#{} took a picture.", message.author.name, message.author.discriminator);
+                            info!(
+                                "{}#{} took a picture.",
+                                message.author.name, message.author.discriminator
+                            );
                             discord
                                 .send_file(message.channel_id, "", buf, "image.jpg")
                                 .context("Failed to send image file!")?;

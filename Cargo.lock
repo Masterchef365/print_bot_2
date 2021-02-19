@@ -338,7 +338,6 @@ dependencies = [
 [[package]]
 name = "discord"
 version = "0.9.0"
-source = "git+https://github.com/SpaceManiac/discord-rs?rev=245f57317a2c2377fd27b63e9c623e3af10e169d#245f57317a2c2377fd27b63e9c623e3af10e169d"
 dependencies = [
  "base64-rs",
  "bitflags 1.2.1",

@@ -23,6 +23,7 @@ git = "https://github.com/Masterchef365/pos58_usb.git"
 rev = "1deb10b"
 
 [dependencies.discord]
-git = "https://github.com/SpaceManiac/discord-rs"
-rev = "245f57317a2c2377fd27b63e9c623e3af10e169d"
-features = []
+path = "../discord-rs"
+#git = "https://github.com/SpaceManiac/discord-rs"
+#rev = "245f57317a2c2377fd27b63e9c623e3af10e169d"
+#features = []

@@ -16,8 +16,6 @@ use v4l::FourCC;
 
 mod printer;
 use printer::PrintHandler;
-//mod camera;
-//use camera::CameraHandler;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
@@ -101,6 +99,13 @@ fn main() -> Result<()> {
     // number of requested buffers for us.
     let mut stream = Stream::with_buffers(&mut dev, Type::VideoCapture, 4)
         .expect("Failed to create buffer stream");
+
+    // Prime the camera
+    let steps = 10;
+    for i in 1..=steps {
+        info!("Priming the camera {}/{}", i, steps);
+        stream.next()?;
+    }
 
     // ###############################################
 

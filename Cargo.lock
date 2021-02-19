@@ -338,6 +338,7 @@ dependencies = [
 [[package]]
 name = "discord"
 version = "0.9.0"
+source = "git+https://github.com/Masterchef365/discord-rs?branch=send_file_patch#03c481b18dc9834599b9dd0dd2372c4c98201846"
 dependencies = [
  "base64-rs",
  "bitflags 1.2.1",

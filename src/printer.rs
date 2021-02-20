@@ -17,7 +17,6 @@ use std::thread;
 
 const PRINTER_WELCOME: &str = "Welcome to Discord!\n\n\n\n";
 
-
 const MAX_DOWNLOAD_SIZE: u64 = 1024 * 1024 * 8; // 8MB
 const PRINTER_CHARS_PER_LINE: usize = 32;
 const PRINTER_DOTS_PER_LINE: u32 = 384;
@@ -37,40 +36,40 @@ enum PrinterMsg {
 
 /// Printer thread is seperate from Discord thread to prevent blockage
 fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
-    info!("Starting printer thread...");
+    loop {
+        info!("Starting printer thread...");
 
-    // Device init
-    let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
-    let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(1))
-        .context("Failed to connect to printer")?;
-    let mut printer = Printer::new(&mut device, None, None);
+        // Device init
+        let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
+        let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(1))
+            .context("Failed to connect to printer")?;
+        let mut printer = Printer::new(&mut device, None, None);
 
-    // Welcome message
-    printer
-        .chain_align("ct")?
-        .chain_println(PRINTER_WELCOME)?
-        .flush()?;
+        // Welcome message
+        printer
+            .chain_align("ct")?
+            .chain_println(PRINTER_WELCOME)?
+            .flush()?;
 
-    // Main print loop
-    info!("Printer thread initialized!");
-    while let Ok(msg) = receiver.recv() {
-        match msg {
-            PrinterMsg::Image(image) => {
-                let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
-                printer
-                    .chain_align("ct")?
-                    .chain_bit_image(&image, None)?
-                    .flush()?;
-            }
-            PrinterMsg::Text(text) => {
-                printer.chain_align("lt")?.chain_println(&text)?.flush()?;
+        // Main print loop
+        info!("Printer thread initialized!");
+        while let Ok(msg) = receiver.recv() {
+            match msg {
+                PrinterMsg::Image(image) => {
+                    let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
+                    printer
+                        .chain_align("ct")?
+                        .chain_bit_image(&image, None)?
+                        .flush()?;
+                    }
+                PrinterMsg::Text(text) => {
+                    printer.chain_align("lt")?.chain_println(&text)?.flush()?;
+                }
             }
         }
+
+        error!("Printer thread stopped, restarting.");
     }
-
-    error!("Printer thread stopped.");
-
-    Ok(())
 }
 
 impl PrintHandler {

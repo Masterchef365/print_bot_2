@@ -37,6 +37,7 @@ struct Opt {
 pub const HELP_COMMAND: &str = "!help";
 pub const PRINT_COMMAND: &str = "!print";
 pub const SHOW_COMMAND: &str = "!showme";
+pub const LINEFEED_COMMAND: &str = "!linefeed";
 
 /// Log a result as an error
 pub fn log_result(res: Result<()>) {
@@ -68,8 +69,8 @@ fn main() -> Result<()> {
     let print_handler = if opt.disable_printer {
         None
     } else {
-        Some(thread::spawn(|| {
-            PrintHandler::new().map_err(|e| e.to_string())
+        Some(thread::spawn(|| -> Result<PrintHandler> {
+            Ok(PrintHandler::new()?)
         }))
     };
 
@@ -78,7 +79,7 @@ fn main() -> Result<()> {
     let discord = Discord::from_bot_token(&token).context("login failed")?;
 
     // Wait for the print handler...
-    let mut print_handler = print_handler.map(|p| p.join().unwrap().unwrap());
+    let mut print_handler = print_handler.and_then(|p| p.join().ok()).transpose()?;
 
     // Establish and use a websocket connection
     let (mut connection, _) = discord.connect().context("connect failed")?;
@@ -168,7 +169,7 @@ fn main() -> Result<()> {
                                 .context("Failed to send image file!")?;
                         }
                         Err(e) => {
-                            error!("Printer error: {}", e);
+                            error!("Camera error: {}", e);
                             discord.send_message(message.channel_id, SORRY_CAMERA, "", false)?;
                         }
                     },

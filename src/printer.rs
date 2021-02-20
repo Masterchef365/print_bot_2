@@ -1,6 +1,5 @@
-use std::io::Read;
-use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver, Sender};
+use anyhow::{Context, Result, anyhow};
+use discord::model::Message;
 use dither::prelude::*;
 use escposify::{img::Image as EscImage, printer::Printer};
 use hyper::client::IntoUrl;
@@ -9,10 +8,11 @@ use hyper::Client;
 use hyper::Url;
 use hyper_native_tls::NativeTlsClient;
 use image::GenericImageView;
-use pos58_usb::POS58USB;
-use discord::model::Message;
-use anyhow::{Context, Result};
 use log::{error, info};
+use pos58_usb::POS58USB;
+use std::io::Read;
+use std::str::FromStr;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 const PRINTER_WELCOME: &str = "Welcome to Discord!\n\n\n\n";
@@ -35,41 +35,39 @@ enum PrinterMsg {
 }
 
 /// Printer thread is seperate from Discord thread to prevent blockage
-fn printer_thread(receiver: Receiver<PrinterMsg>) -> Result<()> {
-    loop {
-        info!("Starting printer thread...");
+fn printer_thread(receiver: &mut Receiver<PrinterMsg>) -> Result<()> {
+    info!("Starting printer thread...");
 
-        // Device init
-        let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
-        let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(1))
-            .context("Failed to connect to printer")?;
-        let mut printer = Printer::new(&mut device, None, None);
+    // Device init
+    let mut usb_context = libusb::Context::new().context("Failed to create LibUSB context.")?;
+    let mut device = POS58USB::new(&mut usb_context, std::time::Duration::from_secs(1))
+        .context("Failed to connect to printer")?;
+    let mut printer = Printer::new(&mut device, None, None);
 
-        // Welcome message
-        printer
-            .chain_align("ct")?
-            .chain_println(PRINTER_WELCOME)?
-            .flush()?;
+    // Welcome message
+    printer
+        .chain_align("ct")?
+        .chain_println(PRINTER_WELCOME)?
+        .flush()?;
 
-        // Main print loop
-        info!("Printer thread initialized!");
-        while let Ok(msg) = receiver.recv() {
-            match msg {
-                PrinterMsg::Image(image) => {
-                    let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
-                    printer
-                        .chain_align("ct")?
-                        .chain_bit_image(&image, None)?
-                        .flush()?;
-                    }
-                PrinterMsg::Text(text) => {
-                    printer.chain_align("lt")?.chain_println(&text)?.flush()?;
+    // Main print loop
+    info!("Printer thread initialized!");
+    while let Ok(msg) = receiver.recv() {
+        match msg {
+            PrinterMsg::Image(image) => {
+                let image = EscImage::from(image::DynamicImage::ImageRgb8(image));
+                printer
+                    .chain_align("ct")?
+                    .chain_bit_image(&image, None)?
+                    .flush()?;
                 }
+            PrinterMsg::Text(text) => {
+                printer.chain_align("lt")?.chain_println(&text)?.flush()?;
             }
         }
-
-        error!("Printer thread stopped, restarting.");
     }
+
+    Err(anyhow!("Printer thread stopped, restarting."))
 }
 
 impl PrintHandler {
@@ -81,8 +79,10 @@ impl PrintHandler {
         let client = hyper::Client::with_connector(connector);
 
         // Channel for Discord <-> printer thread communication
-        let (printer, receiver) = mpsc::channel();
-        thread::spawn(move || crate::log_result(printer_thread(receiver)));
+        let (printer, mut receiver) = mpsc::channel();
+        thread::spawn(move || loop {
+            crate::log_result(printer_thread(&mut receiver))
+        });
 
         let ditherer = Ditherer::from_str("floyd")?;
 
@@ -96,7 +96,10 @@ impl PrintHandler {
     /// Handle a printing command
     pub fn handle_print_request(&mut self, message: Message) -> Result<()> {
         // Check to see if there's anything to do
-        let text = message.content.trim_start_matches(crate::PRINT_COMMAND).trim_start();
+        let text = message
+            .content
+            .trim_start_matches(crate::PRINT_COMMAND)
+            .trim_start();
         if text.is_empty() && message.attachments.is_empty() {
             return Ok(());
         }

@@ -37,12 +37,11 @@ struct Opt {
 pub const HELP_COMMAND: &str = "!help";
 pub const PRINT_COMMAND: &str = "!print";
 pub const SHOW_COMMAND: &str = "!showme";
-pub const LINEFEED_COMMAND: &str = "!linefeed";
 
 /// Log a result as an error
 pub fn log_result(res: Result<()>) {
     if let Err(e) = res {
-        error!("Error: {:#}", e);
+        error!("{:#}", e);
     }
 }
 

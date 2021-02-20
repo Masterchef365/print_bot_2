@@ -20,7 +20,7 @@ v4l = "0.12"
 #pos58_usb = { path = "../pos58_usb" }
 [dependencies.pos58_usb]
 git = "https://github.com/Masterchef365/pos58_usb.git"
-rev = "1deb10b"
+#rev = "1deb10b"
 
 [dependencies.discord]
 git = "https://github.com/Masterchef365/discord-rs"

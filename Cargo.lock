@@ -1003,7 +1003,7 @@ dependencies = [
 [[package]]
 name = "pos58_usb"
 version = "0.1.0"
-source = "git+https://github.com/Masterchef365/pos58_usb.git?rev=1deb10b#1deb10b660e1a92114dfb0a2794386592355b1de"
+source = "git+https://github.com/Masterchef365/pos58_usb.git#7cf315d00e7570d8a653860f0f797ba71104d219"
 dependencies = [
  "libusb",
 ]

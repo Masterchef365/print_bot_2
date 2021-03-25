@@ -249,7 +249,7 @@ fn check_time(range: TimeRange) -> Result<(), String> {
         Ok(())
     } else {
         let (begin, end) = range;
-        Err(format!("Sorry, I'm asleep and the printer makes a bunch of noise. The bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!", begin, end, now.format("%Z")))
+        Err(format!("Sorry, I'm asleep and the printer makes a bunch of noise. The bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!", begin, end, now.format("%:z")))
     }
 }
 

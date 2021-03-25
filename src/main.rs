@@ -1,8 +1,8 @@
 use anyhow::{format_err, Context, Result};
+use chrono::prelude::*;
 use discord::model::Event;
 use discord::Discord;
 use log::{error, info, LevelFilter};
-use std::env;
 use std::path::PathBuf;
 use std::thread;
 use structopt::StructOpt;
@@ -16,9 +16,10 @@ use v4l::FourCC;
 
 mod printer;
 use printer::PrintHandler;
+type TimeRange = (NaiveTime, NaiveTime);
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "example", about = "An example of StructOpt usage.")]
+#[structopt(name = "Printer bot 2", about = "A discord bot for receipt printers")]
 struct Opt {
     /// Disable the camera
     #[structopt(long)]
@@ -31,6 +32,18 @@ struct Opt {
     /// Logging path
     #[structopt(long, default_value = "print_bot.log")]
     log_path: PathBuf,
+
+    /// Discord token
+    #[structopt(long)]
+    token: String,
+
+    /// Begin active hours (local, 24 hour)
+    #[structopt(long)]
+    begin_time: Option<String>,
+
+    /// End active hours (local, 24 hour)
+    #[structopt(long)]
+    end_time: Option<String>,
 }
 
 // Settings
@@ -53,16 +66,25 @@ pub fn fatal_error(res: Result<()>) {
     }
 }
 
+fn parse_time(s: &str) -> Result<NaiveTime> {
+    let mut s = s.split(':');
+    match (s.next(), s.next()) {
+        (Some(h), Some(m)) => Ok(NaiveTime::from_hms(h.parse()?, m.parse()?, 0)),
+        (Some(_), None) => Err(format_err!("Time missing minutes")),
+        (None, Some(_)) => unreachable!(),
+        (None, None) => Err(format_err!("Malformed time")),
+    }
+}
+
 fn main() -> Result<()> {
     // Arg parsing
     let opt = Opt::from_args();
+    let begin_time = opt.begin_time.as_ref().map(|s| parse_time(s)).transpose()?;
+    let end_time = opt.end_time.as_ref().map(|s| parse_time(s)).transpose()?;
+    let time_range = begin_time.zip(end_time);
 
     // Set up logging
     simple_logging::log_to_file(opt.log_path, LevelFilter::Info)?;
-
-    // Arguments
-    let token = env::var("DISCORD_TOKEN")
-        .context("Expected token in DISCORD_TOKEN environment variable.")?;
 
     // Set up printer concurrently with logging into Discord
     let print_handler = if opt.disable_printer {
@@ -75,7 +97,7 @@ fn main() -> Result<()> {
 
     // Log in to Discord using a bot token from the environment
     info!("Logging into discord");
-    let discord = Discord::from_bot_token(&token).context("login failed")?;
+    let discord = Discord::from_bot_token(&opt.token).context("login failed")?;
 
     // Wait for the print handler...
     let mut print_handler = print_handler.and_then(|p| p.join().ok()).transpose()?;
@@ -140,10 +162,22 @@ fn main() -> Result<()> {
                 // Run command
                 match cmd {
                     PRINT_COMMAND => {
+                        if let Some(range) = time_range {
+                            if let Err(msg) = check_time(range) {
+                                info!(
+                                    "Rejecting print job from {} outside of time range",
+                                    message.author.name
+                                );
+                                discord.send_message(message.channel_id, &msg, "", false)?;
+                                continue;
+                            }
+                        }
+
                         info!(
                             "{}#{} began a print job.",
                             message.author.name, message.author.discriminator
                         );
+
                         if let Some(handler) = &mut print_handler {
                             log_result(handler.handle_print_request(message));
                         } else {
@@ -199,3 +233,60 @@ __Commands__:
 
 const SORRY_PRINTER: &str = "Sorry, the printer has been disabled for now :(";
 const SORRY_CAMERA: &str = "Sorry, the camera has been disabled for now :(";
+
+fn time_greater(a: NaiveTime, b: NaiveTime) -> bool {
+    (a - b).num_milliseconds() > 0
+}
+
+fn time_test((begin, end): TimeRange, now: NaiveTime) -> bool {
+    time_greater(end, begin) != (time_greater(now, end) == time_greater(now, begin))
+}
+
+fn check_time(range: TimeRange) -> Result<(), String> {
+    let now = Local::now();
+    let now_naive = now.naive_local().time();
+    if time_test(range, now_naive) {
+        Ok(())
+    } else {
+        let (begin, end) = range;
+        Err(format!("Sorry, I'm asleep and the printer makes a bunch of noise. The bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!", begin, end, now.format("%Z")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time() {
+        assert!(!time_test(
+            (NaiveTime::from_hms(10, 0, 0), NaiveTime::from_hms(14, 0, 0)),
+            NaiveTime::from_hms(9, 0, 0),
+        ));
+
+        assert!(!time_test(
+            (NaiveTime::from_hms(10, 0, 0), NaiveTime::from_hms(14, 0, 0)),
+            NaiveTime::from_hms(15, 0, 0),
+        ));
+
+        assert!(time_test(
+            (NaiveTime::from_hms(10, 0, 0), NaiveTime::from_hms(14, 0, 0)),
+            NaiveTime::from_hms(13, 0, 0),
+        ));
+
+        assert!(time_test(
+            (NaiveTime::from_hms(14, 0, 0), NaiveTime::from_hms(10, 0, 0)),
+            NaiveTime::from_hms(9, 0, 0),
+        ));
+
+        assert!(time_test(
+            (NaiveTime::from_hms(14, 0, 0), NaiveTime::from_hms(10, 0, 0)),
+            NaiveTime::from_hms(15, 0, 0),
+        ));
+
+        assert!(!time_test(
+            (NaiveTime::from_hms(14, 0, 0), NaiveTime::from_hms(10, 0, 0)),
+            NaiveTime::from_hms(13, 0, 0),
+        ));
+    }
+}

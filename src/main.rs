@@ -113,10 +113,22 @@ fn lua_thread(discord: Receiver<String>, printer: Option<Sender<PrinterMsg>>) ->
             Err(e) => print_res(&printer, format!("Error: {}", e))?,
             Ok(v) => v
                 .iter()
-                .map(|v| print_res(&printer, format!("{:?}", v)))
+                .map(|v| print_res(&printer, value_to_string(v)))
                 .collect::<Result<Vec<()>, _>>()
                 .map(|_| ())?,
         }
+    }
+}
+
+use mlua::Value;
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::Nil => "nil".into(),
+        Value::Boolean(b) => if *b { "true".into() } else { "false".into() },
+        Value::Integer(i) => format!("{}", i),
+        Value::Number(n) => format!("{}", n),
+        Value::String(s) => format!("\"{}\"", s.to_str().unwrap_or("")),
+        other => format!("{:?}", other),
     }
 }
 

@@ -102,6 +102,13 @@ fn lua_thread(discord: Receiver<String>, printer: Option<Sender<PrinterMsg>>) ->
 
     loop {
         let msg = discord.recv()?;
+        let msg = msg
+            .trim_start()
+            .trim_start_matches("```lua")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim_end();
+
         match lua.load(&msg).eval::<mlua::MultiValue>() {
             Err(e) => print_res(&printer, format!("Error: {}", e))?,
             Ok(v) => v
@@ -228,7 +235,9 @@ fn main() -> Result<()> {
                             discord.send_message(message.channel_id, SORRY_PRINTER, "", false)?;
                         }
                     }
-                    LUA_COMMAND => lua_tx.send(message.content.trim_start_matches(LUA_COMMAND).to_string())?,
+                    LUA_COMMAND => {
+                        lua_tx.send(message.content.trim_start_matches(LUA_COMMAND).to_string())?
+                    }
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
                     }

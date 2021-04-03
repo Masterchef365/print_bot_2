@@ -46,6 +46,14 @@ struct Opt {
     /// End active hours (local, 24 hour)
     #[structopt(long)]
     end_time: Option<String>,
+
+    /// Max printed bytes
+    #[structopt(long)]
+    max_bytes: Option<u32>,
+
+    /// Max instructions
+    #[structopt(long)]
+    max_instructions: Option<u32>,
 }
 
 // Settings
@@ -83,7 +91,12 @@ fn lua_err(res: mlua::Error) -> anyhow::Error {
     format_err!("{}", res)
 }
 
-fn lua_thread(discord: Receiver<String>, printer: Option<Sender<PrinterMsg>>) -> Result<()> {
+fn lua_thread(
+    discord: Receiver<String>,
+    printer: Option<Sender<PrinterMsg>>,
+    max_instructions: u32,
+    max_bytes: u32,
+) -> Result<()> {
     info!("Lua thread started");
     let lua = mlua::Lua::new();
 
@@ -94,14 +107,11 @@ fn lua_thread(discord: Receiver<String>, printer: Option<Sender<PrinterMsg>>) ->
         }
     }
 
-    let lua_printer = printer.clone();
-    let print = lua
-        .create_function(move |_, v: String| Ok(print_res(&lua_printer, v).unwrap()))
-        .map_err(lua_err)?;
-    lua.globals().set("print", print).map_err(lua_err)?;
-
     loop {
+        // Receive
         let msg = discord.recv()?;
+
+        // If present, remove code block
         let msg = msg
             .trim_start()
             .trim_start_matches("```lua")
@@ -109,7 +119,37 @@ fn lua_thread(discord: Receiver<String>, printer: Option<Sender<PrinterMsg>>) ->
             .trim_end_matches("```")
             .trim_end();
 
+        // Printing and byte exhaustion
+        let remaining_bytes = std::rc::Rc::new(std::cell::RefCell::new(max_bytes as i64));
+        let lua_printer = printer.clone();
+        let print = lua
+            .create_function(move |_, v: String| {
+                *remaining_bytes.borrow_mut() -= v.as_bytes().len() as i64;
+                match *remaining_bytes.borrow() > 0 {
+                    true => Ok(print_res(&lua_printer, v).unwrap()),
+                    false => Err(mlua::Error::RuntimeError("Print byte limit reached".into())),
+                }
+            })
+            .map_err(lua_err)?;
+        lua.globals().set("print", print).map_err(lua_err)?;
+
+        // Instruction exhaustion
+        lua.set_hook(
+            mlua::HookTriggers {
+                every_nth_instruction: Some(max_instructions),
+                ..Default::default()
+            },
+            move |_, _| {
+                Err(mlua::Error::RuntimeError(
+                    "Instruction limit reached".into(),
+                ))
+            },
+        )
+        .unwrap();
+
+        // Execute
         match lua.load(&msg).eval::<mlua::MultiValue>() {
+            Err(mlua::Error::RuntimeError(re)) => print_res(&printer, format!("Runtime error: {}", re))?,
             Err(e) => print_res(&printer, format!("Error: {}", e))?,
             Ok(v) => v
                 .iter()
@@ -117,6 +157,9 @@ fn lua_thread(discord: Receiver<String>, printer: Option<Sender<PrinterMsg>>) ->
                 .collect::<Result<Vec<()>, _>>()
                 .map(|_| ())?,
         }
+
+        // Remove limit
+        lua.remove_hook();
     }
 }
 
@@ -124,7 +167,13 @@ use mlua::Value;
 fn value_to_string(value: &Value) -> String {
     match value {
         Value::Nil => "nil".into(),
-        Value::Boolean(b) => if *b { "true".into() } else { "false".into() },
+        Value::Boolean(b) => {
+            if *b {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
         Value::Integer(i) => format!("{}", i),
         Value::Number(n) => format!("{}", n),
         Value::String(s) => format!("\"{}\"", s.to_str().unwrap_or("")),
@@ -202,7 +251,10 @@ fn main() -> Result<()> {
 
     let (lua_tx, lua_rx) = mpsc::channel::<String>();
     let sender = print_handler.as_ref().map(|(_, s)| s.clone());
-    let lua_thread = std::thread::spawn(move || lua_thread(lua_rx, sender));
+    let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
+    let max_bytes = opt.max_bytes.unwrap_or(u32::MAX);
+    let lua_thread =
+        std::thread::spawn(move || lua_thread(lua_rx, sender, max_instructions, max_bytes));
     // TODO: Graceful shutdown command for lua channel?
 
     // ###############################################

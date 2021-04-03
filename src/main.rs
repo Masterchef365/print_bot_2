@@ -14,8 +14,10 @@ use v4l::video::Capture;
 use v4l::Device;
 use v4l::FourCC;
 
+use std::sync::mpsc::{self, Receiver, Sender};
+
 mod printer;
-use printer::PrintHandler;
+use printer::{PrintHandler, PrinterMsg};
 type TimeRange = (NaiveTime, NaiveTime);
 
 #[derive(Debug, StructOpt)]
@@ -50,6 +52,7 @@ struct Opt {
 pub const HELP_COMMAND: &str = "!help";
 pub const PRINT_COMMAND: &str = "!print";
 pub const SHOW_COMMAND: &str = "!showme";
+pub const LUA_COMMAND: &str = "!lua";
 
 /// Log a result as an error
 pub fn log_result(res: Result<()>) {
@@ -76,6 +79,40 @@ fn parse_time(s: &str) -> Result<NaiveTime> {
     }
 }
 
+fn lua_err(res: mlua::Error) -> anyhow::Error {
+    format_err!("{}", res)
+}
+
+fn lua_thread(discord: Receiver<String>, printer: Option<Sender<PrinterMsg>>) -> Result<()> {
+    info!("Lua thread started");
+    let lua = mlua::Lua::new();
+
+    fn print_res(printer: &Option<Sender<PrinterMsg>>, msg: String) -> Result<()> {
+        match printer {
+            Some(p) => Ok(p.send(PrinterMsg::Text(msg))?),
+            None => Ok(eprintln!("No printer, LUA debug: {}", msg)),
+        }
+    }
+
+    let lua_printer = printer.clone();
+    let print = lua
+        .create_function(move |_, v: String| Ok(print_res(&lua_printer, v).unwrap()))
+        .map_err(lua_err)?;
+    lua.globals().set("print", print).map_err(lua_err)?;
+
+    loop {
+        let msg = discord.recv()?;
+        match lua.load(&msg).eval::<mlua::MultiValue>() {
+            Err(e) => print_res(&printer, format!("Error: {}", e))?,
+            Ok(v) => v
+                .iter()
+                .map(|v| print_res(&printer, format!("{:?}", v)))
+                .collect::<Result<Vec<()>, _>>()
+                .map(|_| ())?,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // Arg parsing
     let opt = Opt::from_args();
@@ -90,9 +127,9 @@ fn main() -> Result<()> {
     let print_handler = if opt.disable_printer {
         None
     } else {
-        Some(thread::spawn(|| -> Result<PrintHandler> {
-            Ok(PrintHandler::new()?)
-        }))
+        Some(thread::spawn(
+            || -> Result<(PrintHandler, Sender<PrinterMsg>)> { Ok(PrintHandler::new()?) },
+        ))
     };
 
     // Log in to Discord using a bot token from the environment
@@ -121,7 +158,7 @@ fn main() -> Result<()> {
             Ok(dev)
         })
         .transpose()
-        .context("Failed to open camear")?;
+        .context("Failed to open camera")?;
 
     // Create the stream, which will internally 'allocate' (as in map) the
     // number of requested buffers for us.
@@ -141,6 +178,13 @@ fn main() -> Result<()> {
             Ok(stream)
         })
         .transpose()?;
+
+    // ################# LUA ######################
+
+    let (lua_tx, lua_rx) = mpsc::channel::<String>();
+    let sender = print_handler.as_ref().map(|(_, s)| s.clone());
+    let lua_thread = std::thread::spawn(move || lua_thread(lua_rx, sender));
+    // TODO: Graceful shutdown command for lua channel?
 
     // ###############################################
 
@@ -178,12 +222,13 @@ fn main() -> Result<()> {
                             message.author.name, message.author.discriminator
                         );
 
-                        if let Some(handler) = &mut print_handler {
+                        if let Some((handler, _)) = &mut print_handler {
                             log_result(handler.handle_print_request(message));
                         } else {
                             discord.send_message(message.channel_id, SORRY_PRINTER, "", false)?;
                         }
                     }
+                    LUA_COMMAND => lua_tx.send(message.content.trim_start_matches(LUA_COMMAND).to_string())?,
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
                     }
@@ -217,6 +262,9 @@ fn main() -> Result<()> {
             Err(err) => error!("Receive error: {:?}", err),
         }
     }
+
+    lua_thread.join().unwrap()?;
+
     Ok(())
 }
 

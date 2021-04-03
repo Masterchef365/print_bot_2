@@ -29,7 +29,7 @@ pub struct PrintHandler {
 }
 
 /// Message from discord thread to printer thread
-enum PrinterMsg {
+pub enum PrinterMsg {
     Image(image::RgbImage),
     Text(String),
 }
@@ -72,7 +72,7 @@ fn printer_thread(receiver: &mut Receiver<PrinterMsg>) -> Result<()> {
 
 impl PrintHandler {
     /// Create a new handler
-    pub fn new() -> Result<Self> {
+    pub fn new() -> Result<(Self, Sender<PrinterMsg>)> {
         // Hyper client
         let ssl = NativeTlsClient::new()?;
         let connector = HttpsConnector::new(ssl);
@@ -86,11 +86,13 @@ impl PrintHandler {
 
         let ditherer = Ditherer::from_str("floyd")?;
 
-        Ok(Self {
+        let sender = printer.clone();
+
+        Ok((Self {
             client,
             ditherer,
             printer,
-        })
+        }, sender))
     }
 
     /// Handle a printing command

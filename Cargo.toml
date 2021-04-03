@@ -17,6 +17,7 @@ simple-logging = "2.0"
 structopt = { version = "0.3", default-features = false }
 v4l = "0.12"
 chrono = "0.4"
+mlua = { version = "0.5", features = ["lua54"] }
 
 #pos58_usb = { path = "../pos58_usb" }
 [dependencies.pos58_usb]

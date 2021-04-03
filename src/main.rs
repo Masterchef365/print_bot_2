@@ -285,15 +285,13 @@ fn main() -> Result<()> {
                 // Run command
                 match cmd {
                     PRINT_COMMAND => {
-                        if let Some(range) = time_range {
-                            if let Err(msg) = check_time(range) {
-                                info!(
-                                    "Rejecting print job from {} outside of time range",
-                                    message.author.name
-                                );
-                                discord.send_message(message.channel_id, &msg, "", false)?;
-                                continue;
-                            }
+                        if let Some(Err(msg)) = time_range.map(|range| check_time(range)) {
+                            info!(
+                                "Rejecting print job from {} outside of time range",
+                                message.author.name
+                            );
+                            discord.send_message(message.channel_id, &msg, "", false)?;
+                            continue;
                         }
 
                         info!(
@@ -308,6 +306,14 @@ fn main() -> Result<()> {
                         }
                     }
                     LUA_COMMAND => {
+                        if let Some(Err(msg)) = time_range.map(|range| check_time(range)) {
+                            info!(
+                                "Rejecting lua job from {} outside of time range",
+                                message.author.name
+                            );
+                            discord.send_message(message.channel_id, &msg, "", false)?;
+                            continue;
+                        }
                         lua_tx.send(message.content.trim_start_matches(LUA_COMMAND).to_string())?
                     }
                     HELP_COMMAND => {

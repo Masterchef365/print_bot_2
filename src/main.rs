@@ -98,7 +98,9 @@ fn lua_thread(
     max_bytes: u32,
 ) -> Result<()> {
     info!("Lua thread started");
-    let lua = mlua::Lua::new();
+    use mlua::StdLib;
+    let lua = mlua::Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::ALL_SAFE)
+        .map_err(lua_err)?;
 
     fn print_res(printer: &Option<Sender<PrinterMsg>>, msg: String) -> Result<()> {
         match printer {

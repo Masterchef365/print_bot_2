@@ -145,11 +145,17 @@ fn lua_thread(
                 ))
             },
         )
-        .unwrap();
+        .map_err(lua_err)?;
 
         // Execute
         match lua.load(&msg).eval::<mlua::MultiValue>() {
-            Err(mlua::Error::RuntimeError(re)) => print_res(&printer, format!("Runtime error: {}", re))?,
+            Err(mlua::Error::CallbackError { cause, .. }) => {
+                if let mlua::Error::RuntimeError(v) = cause.as_ref() {
+                    print_res(&printer, format!("{}", v))?;
+                } else {
+                    print_res(&printer, format!("Callback error: {}", cause))?;
+                }
+            }
             Err(e) => print_res(&printer, format!("Error: {}", e))?,
             Ok(v) => v
                 .iter()

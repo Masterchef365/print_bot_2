@@ -18,8 +18,8 @@ use std::thread;
 const PRINTER_WELCOME: &str = "Welcome to Discord!\n\n\n\n";
 
 const MAX_DOWNLOAD_SIZE: u64 = 1024 * 1024 * 8; // 8MB
-const PRINTER_CHARS_PER_LINE: usize = 32;
-const PRINTER_DOTS_PER_LINE: u32 = 384;
+pub const PRINTER_CHARS_PER_LINE: usize = 32;
+pub const PRINTER_DOTS_PER_LINE: u32 = 384;
 
 /// Message handling service
 pub struct PrintHandler {

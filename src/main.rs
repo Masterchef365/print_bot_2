@@ -1,4 +1,4 @@
-use anyhow::{format_err, Context, Result};
+use anyhow::{ensure, format_err, Context, Result};
 use chrono::prelude::*;
 use discord::model::Event;
 use discord::Discord;
@@ -14,7 +14,10 @@ use v4l::video::Capture;
 use v4l::Device;
 use v4l::FourCC;
 
+use image::RgbImage;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 mod printer;
 use printer::{PrintHandler, PrinterMsg};
@@ -47,9 +50,14 @@ struct Opt {
     #[structopt(long)]
     end_time: Option<String>,
 
-    /// Max printed bytes
+    /// Max printed bytes for text
     #[structopt(long)]
-    max_bytes: Option<u32>,
+    max_bytes_text: Option<u32>,
+
+    /// Max printed bytes for images
+    /// WARNING: User may escape image mode and use this to write more text than max_bytes_text
+    #[structopt(long)]
+    max_bytes_image: Option<u32>,
 
     /// Max instructions
     #[structopt(long)]
@@ -91,21 +99,26 @@ fn lua_err(res: mlua::Error) -> anyhow::Error {
     format_err!("{}", res)
 }
 
+/// Role: Act as the communication layer between Discord, LUA, and the Printer
 fn lua_thread(
     discord: Receiver<String>,
     printer: Option<Sender<PrinterMsg>>,
     max_instructions: u32,
-    max_bytes: u32,
+    max_bytes_text: u32,
+    max_bytes_image: u32,
 ) -> Result<()> {
     info!("Lua thread started");
     use mlua::StdLib;
     let lua = mlua::Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::ALL_SAFE)
         .map_err(lua_err)?;
 
-    fn print_res(printer: &Option<Sender<PrinterMsg>>, msg: String) -> Result<()> {
+    fn print_res(printer: &Option<Sender<PrinterMsg>>, msg: PrinterMsg) -> Result<()> {
         match printer {
-            Some(p) => Ok(p.send(PrinterMsg::Text(msg))?),
-            None => Ok(eprintln!("No printer, LUA debug: {}", msg)),
+            Some(p) => Ok(p.send(msg)?),
+            None => Ok(match msg {
+                PrinterMsg::Image(img) => eprintln!("LUA debug: {:?}", img.as_raw()),
+                PrinterMsg::Text(txt) => eprintln!("LUA debug: {}", txt),
+            }),
         }
     }
 
@@ -120,20 +133,39 @@ fn lua_thread(
             .trim_start_matches("```")
             .trim_end_matches("```")
             .trim_end();
+        use mlua::Error;
 
-        // Printing and byte exhaustion
-        let remaining_bytes = std::rc::Rc::new(std::cell::RefCell::new(max_bytes as i64));
+        // Text printing and byte exhaustion
+        let remaining_bytes = Rc::new(RefCell::new(max_bytes_text as i64));
         let lua_printer = printer.clone();
         let print = lua
             .create_function(move |_, v: String| {
                 *remaining_bytes.borrow_mut() -= v.as_bytes().len() as i64;
                 match *remaining_bytes.borrow() > 0 {
-                    true => Ok(print_res(&lua_printer, v).unwrap()),
-                    false => Err(mlua::Error::RuntimeError("Print byte limit reached".into())),
+                    true => Ok(print_res(&lua_printer, PrinterMsg::Text(v)).unwrap()),
+                    false => Err(Error::RuntimeError("Text byte limit reached".into())),
                 }
             })
             .map_err(lua_err)?;
         lua.globals().set("print", print).map_err(lua_err)?;
+
+        // Image printing and byte exhaustion
+        let remaining_bytes = Rc::new(RefCell::new(max_bytes_image as i64));
+        let lua_printer = printer.clone();
+        let print_image = lua
+            .create_function(move |_, v: Vec<u8>| {
+                *remaining_bytes.borrow_mut() -= v.len() as i64;
+                match *remaining_bytes.borrow() > 0 {
+                    true => {
+                        let image = lua_image_to_rbgimage(v)
+                            .map_err(|e| Error::RuntimeError(e.to_string()))?;
+                        Ok(print_res(&lua_printer, PrinterMsg::Image(image)).unwrap())
+                    }
+                    false => Err(Error::RuntimeError("Image byte limit reached".into())),
+                }
+            })
+            .map_err(lua_err)?;
+        lua.globals().set("image", print_image).map_err(lua_err)?;
 
         // Instruction exhaustion
         lua.set_hook(
@@ -153,15 +185,18 @@ fn lua_thread(
         match lua.load(&msg).eval::<mlua::MultiValue>() {
             Err(mlua::Error::CallbackError { cause, .. }) => {
                 if let mlua::Error::RuntimeError(v) = cause.as_ref() {
-                    print_res(&printer, format!("{}", v))?;
+                    print_res(&printer, PrinterMsg::Text(format!("{}", v)))?;
                 } else {
-                    print_res(&printer, format!("Callback error: {}", cause))?;
+                    print_res(
+                        &printer,
+                        PrinterMsg::Text(format!("Callback error: {}", cause)),
+                    )?;
                 }
             }
-            Err(e) => print_res(&printer, format!("Error: {}", e))?,
+            Err(e) => print_res(&printer, PrinterMsg::Text(format!("Error: {}", e)))?,
             Ok(v) => v
                 .iter()
-                .map(|v| print_res(&printer, value_to_string(v)))
+                .map(|v| print_res(&printer, PrinterMsg::Text(value_to_string(v))))
                 .collect::<Result<Vec<()>, _>>()
                 .map(|_| ())?,
         }
@@ -169,6 +204,25 @@ fn lua_thread(
         // Remove limit
         lua.remove_hook();
     }
+}
+
+fn lua_image_to_rbgimage(image: Vec<u8>) -> Result<RgbImage> {
+    ensure!(
+        image.len() as u32 % printer::PRINTER_DOTS_PER_LINE == 0,
+        "Err: Img width != 384"
+    );
+    let mut rgb = Vec::with_capacity(image.len() * 3);
+
+    for &px in &image {
+        rgb.extend(&[px; 3]);
+    }
+
+    RgbImage::from_vec(
+        printer::PRINTER_DOTS_PER_LINE,
+        image.len() as u32 / printer::PRINTER_DOTS_PER_LINE,
+        rgb,
+    )
+    .context("Failed to create rgb image")
 }
 
 use mlua::Value;
@@ -260,9 +314,17 @@ fn main() -> Result<()> {
     let (lua_tx, lua_rx) = mpsc::channel::<String>();
     let sender = print_handler.as_ref().map(|(_, s)| s.clone());
     let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
-    let max_bytes = opt.max_bytes.unwrap_or(u32::MAX);
-    let lua_thread =
-        std::thread::spawn(move || lua_thread(lua_rx, sender, max_instructions, max_bytes));
+    let max_bytes_text = opt.max_bytes_text.unwrap_or(u32::MAX);
+    let max_bytes_image = opt.max_bytes_image.unwrap_or(u32::MAX);
+    let lua_thread = std::thread::spawn(move || {
+        lua_thread(
+            lua_rx,
+            sender,
+            max_instructions,
+            max_bytes_text,
+            max_bytes_image,
+        )
+    });
     // TODO: Graceful shutdown command for lua channel?
 
     // ###############################################

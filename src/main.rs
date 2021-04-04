@@ -116,8 +116,8 @@ fn lua_thread(
         match printer {
             Some(p) => Ok(p.send(msg)?),
             None => Ok(match msg {
-                PrinterMsg::Image(img) => eprintln!("LUA debug: {:?}", img.as_raw()),
-                PrinterMsg::Text(txt) => eprintln!("LUA debug: {}", txt),
+                PrinterMsg::Image(img) => eprintln!("Lua image {}x{}: {:?}", img.width(), img.height(), img.as_raw()),
+                PrinterMsg::Text(txt) => eprintln!("Lua text: {}", txt),
             }),
         }
     }
@@ -153,7 +153,7 @@ fn lua_thread(
         let remaining_bytes = Rc::new(RefCell::new(max_bytes_image as i64));
         let lua_printer = printer.clone();
         let print_image = lua
-            .create_function(move |_, v: Vec<u8>| {
+            .create_function(move |_, v: Vec<bool>| {
                 *remaining_bytes.borrow_mut() -= v.len() as i64;
                 match *remaining_bytes.borrow() > 0 {
                     true => {
@@ -206,7 +206,7 @@ fn lua_thread(
     }
 }
 
-fn lua_image_to_rbgimage(image: Vec<u8>) -> Result<RgbImage> {
+fn lua_image_to_rbgimage(image: Vec<bool>) -> Result<RgbImage> {
     ensure!(
         image.len() as u32 % printer::PRINTER_DOTS_PER_LINE == 0,
         "Err: Img width != 384"
@@ -214,10 +214,11 @@ fn lua_image_to_rbgimage(image: Vec<u8>) -> Result<RgbImage> {
     let mut rgb = Vec::with_capacity(image.len() * 3);
 
     for &px in &image {
+        let px = if px { 0x00 } else { 0xFF };
         rgb.extend(&[px; 3]);
     }
 
-    RgbImage::from_vec(
+    RgbImage::from_raw(
         printer::PRINTER_DOTS_PER_LINE,
         image.len() as u32 / printer::PRINTER_DOTS_PER_LINE,
         rgb,

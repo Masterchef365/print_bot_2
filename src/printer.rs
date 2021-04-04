@@ -202,7 +202,6 @@ impl PrintHandler {
             .context("Could not convert back to a regular image")?;
 
         // Send image to the printer thread
-        // NOTE: This is a fatal error; the expect is intentional!
         crate::fatal_error(
             self.printer
                 .send(PrinterMsg::Image(image))

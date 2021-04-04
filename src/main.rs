@@ -116,7 +116,11 @@ fn lua_thread(
         match printer {
             Some(p) => Ok(p.send(msg)?),
             None => Ok(match msg {
-                PrinterMsg::Image(img) => eprintln!("Lua image {}x{}: {:?}", img.width(), img.height(), img.as_raw()),
+                PrinterMsg::Image(img) => {
+                    let path = Local::now().format("lua-%H-%M-%S.png").to_string();
+                    eprintln!("Lua image {}x{}: {}", img.width(), img.height(), &path);
+                    img.save(&path)?;
+                },
                 PrinterMsg::Text(txt) => eprintln!("Lua text: {}", txt),
             }),
         }
@@ -159,7 +163,7 @@ fn lua_thread(
                     true => {
                         let image = lua_image_to_rbgimage(v)
                             .map_err(|e| Error::RuntimeError(e.to_string()))?;
-                        Ok(print_res(&lua_printer, PrinterMsg::Image(image)).unwrap())
+                        print_res(&lua_printer, PrinterMsg::Image(image)).map_err(|e| Error::RuntimeError(e.to_string()))
                     }
                     false => Err(Error::RuntimeError("Image byte limit reached".into())),
                 }

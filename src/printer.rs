@@ -12,8 +12,7 @@ use log::{error, info};
 use pos58_usb::POS58USB;
 use std::io::Read;
 use std::str::FromStr;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
+use std::sync::mpsc::{Receiver, Sender};
 
 const PRINTER_WELCOME: &str = "Welcome to Discord!\n\n\n\n";
 
@@ -79,8 +78,6 @@ impl PrintHandler {
         let client = hyper::Client::with_connector(connector);
 
         let ditherer = Ditherer::from_str("floyd")?;
-
-        let sender = printer.clone();
 
         Ok(Self {
             client,

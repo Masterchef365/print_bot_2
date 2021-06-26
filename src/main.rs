@@ -18,7 +18,6 @@ use image::RgbImage;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod printer;
@@ -433,7 +432,18 @@ async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: Strin
     while let Some(res) = stream.next().await {
         let msg = res?;
         if let (StreamMessage::Tweet(t), Some(printer)) = (msg, &printer) {
+            // Send the tweet
             printer.send(PrinterMsg::Text(t.text))?;
+
+            if let Some(pic) = camera.as_ref().and_then(|c| c.capture(Duration::from_secs(2))) {
+                let handle = egg_mode::media::upload_media(&pic, &egg_mode::media::media_types::image_jpg(), &token).await?;
+                let mut draft = egg_mode::tweet::DraftTweet::new("Here ya go!")
+                    .in_reply_to(t.id)
+                    .auto_populate_reply_metadata(true);
+                draft.add_media(handle.id);
+                draft.send(&token).await?;
+            }
+
         }
     }
 

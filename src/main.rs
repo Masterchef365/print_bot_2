@@ -24,7 +24,6 @@ mod printer;
 mod time_range;
 use time_range::TimeRange;
 use printer::{PrintHandler, PrinterMsg};
-type Camera = Arc<Mutex<Option<Stream<'static>>>>;
 mod twitter_login;
 
 #[derive(Debug, StructOpt)]
@@ -69,6 +68,25 @@ struct Opt {
     max_instructions: Option<u32>,
 }
 
+/*
+type CameraFrame = Arc<Mutex<Option<Box<[u8]>>>>;
+struct CameraClient {
+    sender: Sender<()>,
+    frame: CameraFrame,
+}
+
+fn camera_thread(recv: Receiver<()>, frame: CameraFrame) -> Result<()> {
+    loop {
+        let _ = recv.recv()?;
+        // lock mutex so that your partner waits... Hopefully... Tbh it'd be best to have them spin
+        // on an atomic with a timeout or something... 
+        // capture frame
+        // update shared frame
+        // signal...?
+    }
+}
+*/
+
 // Settings
 pub const HELP_COMMAND: &str = "!help";
 pub const PRINT_COMMAND: &str = "!print";
@@ -104,8 +122,8 @@ fn lua_err(res: mlua::Error) -> anyhow::Error {
     format_err!("{}", res)
 }
 
+/*
 fn camera_next_frame(camera: Camera) -> Option<&'static [u8]> {
-    /*
     match camera.lock() {
         Ok(ref mut c) => {
             match c.as_mut()?.next() {
@@ -120,9 +138,9 @@ fn camera_next_frame(camera: Camera) -> Option<&'static [u8]> {
         }
         _ => None,
     }
-    */
     todo!()
 }
+*/
 
 /// Role: Act as the communication layer between Discord, LUA, and the Printer
 fn lua_thread(
@@ -376,6 +394,7 @@ fn discord_thread(
 fn twitter_thread(printer: Option<Sender<PrinterMsg>>) {
     tokio::runtime::Builder::new()
         //.threaded_scheduler()
+        .basic_scheduler()
         .enable_all()
         .build()
         .unwrap()
@@ -390,6 +409,7 @@ fn twitter_thread(printer: Option<Sender<PrinterMsg>>) {
 async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>) -> Result<()> {
     use tokio::stream::StreamExt;
     let env_var_errmsg = "Required environment variables are API_KEY, API_SECRET_KEY";//, and BEARER_TOKEN.";
+    // TODO: Get these environment variables from the args
     let key = std::env::var("API_KEY").context(env_var_errmsg)?;
     let secret_key = std::env::var("API_SECRET_KEY").context(env_var_errmsg)?;
     let con_token = egg_mode::KeyPair::new(key, secret_key);
@@ -405,7 +425,7 @@ async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>) -> Result<
         let msg = res?;
         if let Some(printer) = &printer {
             if let StreamMessage::Tweet(t) = msg {
-                printer.send(PrinterMsg::Text(t.text));
+                printer.send(PrinterMsg::Text(t.text))?;
             }
         }
     }

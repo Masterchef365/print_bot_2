@@ -41,10 +41,17 @@ struct Opt {
     #[structopt(long, default_value = "print_bot.log")]
     log_path: PathBuf,
 
-    // TODO discord_token: Option<String>
-    /// Discord token
+    /// Discord bot token
     #[structopt(long)]
-    token: String,
+    discord_token: Option<String>,
+
+    /// Twitter API key
+    #[structopt(long)]
+    twitter_key: Option<String>,
+
+    /// Twitter API secret key
+    #[structopt(long)]
+    twitter_secret: Option<String>,
 
     /// Begin active hours (local, 24 hour)
     #[structopt(long)]
@@ -391,30 +398,29 @@ fn discord_thread(
     }
 }
 
-fn twitter_thread(printer: Option<Sender<PrinterMsg>>) {
+fn twitter_thread(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String) {
     tokio::runtime::Builder::new()
         //.threaded_scheduler()
         .basic_scheduler()
         .enable_all()
         .build()
         .unwrap()
-        .spawn(async move {
+        .block_on(async move {
             loop {
                 let p = printer.clone();
-                log_result(twitter_thread_internal(p).await)
+                log_result(twitter_thread_internal(p, key.clone(), secret_key.clone()).await)
             }
         });
 }
 
-async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>) -> Result<()> {
+async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String) -> Result<()> {
+    info!("Twiter is logging in...");
+
     use tokio::stream::StreamExt;
-    let env_var_errmsg = "Required environment variables are API_KEY, API_SECRET_KEY";//, and BEARER_TOKEN.";
-    // TODO: Get these environment variables from the args
-    let key = std::env::var("API_KEY").context(env_var_errmsg)?;
-    let secret_key = std::env::var("API_SECRET_KEY").context(env_var_errmsg)?;
     let con_token = egg_mode::KeyPair::new(key, secret_key);
     let (config, token) = twitter_login::login(con_token, "login.txt").await?;
-    dbg!(config.screen_name);
+
+    info!("Twitter logged in as {} config.screen_name", config.screen_name);
 
     use egg_mode::stream::{filter, StreamMessage};
     let mut stream = filter()
@@ -493,8 +499,7 @@ fn main() -> Result<()> {
     let camera_stream = Arc::new(Mutex::new(camera_stream));
     */
 
-    // ################# LUA ######################
-
+    // Spawn Lua thread 
     let (lua_tx, lua_rx) = mpsc::channel::<String>();
     let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
     let max_bytes_text = opt.max_bytes_text.unwrap_or(u32::MAX);
@@ -509,14 +514,19 @@ fn main() -> Result<()> {
             max_bytes_image,
         )
     });
-    // TODO: Graceful shutdown command for lua channel?
 
-    twitter_thread(printer.clone());
+    // Spawn Discord thread
+    let discord_printer = printer.clone();
+    if let Some(token) = opt.discord_token {
+        std::thread::spawn(move || loop {
+            log_result(discord_thread(&token, time_range, lua_tx.clone(), discord_printer.clone()))
+        });
+    }
 
-    let token = opt.token;
-    std::thread::spawn(move || loop {
-        log_result(discord_thread(&token, time_range, lua_tx.clone(), printer.clone()))
-    });
+    // Enter Twitter thread
+    if let Some((key, secret_key)) = opt.twitter_key.zip(opt.twitter_secret) {
+        twitter_thread(printer.clone(), key, secret_key);
+    }
 
     lua_thread.join().unwrap()?;
 

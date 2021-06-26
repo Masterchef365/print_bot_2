@@ -19,6 +19,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 mod printer;
 mod time_range;
@@ -75,24 +76,51 @@ struct Opt {
     max_instructions: Option<u32>,
 }
 
-/*
-type CameraFrame = Arc<Mutex<Option<Box<[u8]>>>>;
 struct CameraClient {
-    sender: Sender<()>,
-    frame: CameraFrame,
+    pub recv: Receiver<Vec<u8>>,
+    pub sender: Sender<usize>,
+    pub id: usize,
 }
 
-fn camera_thread(recv: Receiver<()>, frame: CameraFrame) -> Result<()> {
-    loop {
-        let _ = recv.recv()?;
-        // lock mutex so that your partner waits... Hopefully... Tbh it'd be best to have them spin
-        // on an atomic with a timeout or something... 
-        // capture frame
-        // update shared frame
-        // signal...?
+impl CameraClient {
+    pub fn capture(&self, timeout: Duration) -> Option<Vec<u8>> {
+        self.sender.send(self.id).ok()?;
+        self.recv.recv_timeout(timeout).ok()
     }
 }
-*/
+
+fn camera_thread(recv: Receiver<usize>, clients: Vec<Sender<Vec<u8>>>) -> Result<()> {
+    // Create a new capture device with a few extra parameters
+    let dev = Device::new(0).context("Open device")?;
+
+    // Let's say we want to explicitly request another format
+    let mut fmt = dev.format().context("Read format")?;
+    fmt.width = 1280;
+    fmt.height = 720;
+    fmt.fourcc = FourCC::new(b"MJPG");
+    dev.set_format(&fmt).context("Write format")?;
+
+    // The camera will remain in use for the duration of the program.
+    let dev = Box::leak(Box::new(dev));
+
+    // Create the stream, which will internally 'allocate' (as in map) the
+    // number of requested buffers for us.
+    let mut stream = Stream::with_buffers(dev, Type::VideoCapture, 4)
+        .context("Failed to create buffer stream")?;
+
+    // Prime the camera
+    let steps = 5;
+    for i in 1..=steps {
+        info!("Priming the camera {}/{}", i, steps);
+        stream.next()?;
+    }
+
+    loop {
+        let client_idx = recv.recv()?;
+        let (buffer, _meta) = stream.next()?;
+        clients[client_idx].send(buffer.to_vec())?;
+    }
+}
 
 // Settings
 pub const HELP_COMMAND: &str = "!help";
@@ -128,26 +156,6 @@ fn parse_time(s: &str) -> Result<NaiveTime> {
 fn lua_err(res: mlua::Error) -> anyhow::Error {
     format_err!("{}", res)
 }
-
-/*
-fn camera_next_frame(camera: Camera) -> Option<&'static [u8]> {
-    match camera.lock() {
-        Ok(ref mut c) => {
-            match c.as_mut()?.next() {
-                Ok((frame, _meta)) => Some(frame),
-                Err(e) => {
-                    error!("Camera error: {}", e);
-                    drop(camera);
-                    c.take();
-                    None
-                }
-            }
-        }
-        _ => None,
-    }
-    todo!()
-}
-*/
 
 /// Role: Act as the communication layer between Discord, LUA, and the Printer
 fn lua_thread(
@@ -301,10 +309,10 @@ fn value_to_string(value: &Value) -> String {
 /// Discord interaction
 fn discord_thread(
     token: &str, 
-    //camera: Camera, 
     time_range: Option<TimeRange>, 
     lua_tx: Sender<String>, 
-    printer: Option<Sender<PrinterMsg>>
+    printer: Option<Sender<PrinterMsg>>,
+    camera: Option<CameraClient>,
 ) -> Result<()> {
     // Set up printer concurrently with logging into Discord
     let mut print_handler = printer.map(|tx| PrintHandler::new(tx)).transpose()?;
@@ -370,22 +378,20 @@ fn discord_thread(
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
                     }
-                    /*
-                    SHOW_COMMAND => match camera_next_frame(camera) {
+                    SHOW_COMMAND => match camera.as_ref().and_then(|c| c.capture(Duration::from_secs(2))) {
                         Some(buf) => {
                             info!(
                                 "{}#{} took a picture.",
                                 message.author.name, message.author.discriminator
                             );
                             discord
-                                .send_file(message.channel_id, "", buf, "image.jpg")
+                                .send_file(message.channel_id, "", std::io::Cursor::new(buf), "image.jpg")
                                 .context("Failed to send image file!")?;
                         }
                         None => {
                             discord.send_message(message.channel_id, SORRY_CAMERA, "", false)?;
                         }
                     },
-                    */
                     _ => (),
                 }
             }
@@ -398,7 +404,7 @@ fn discord_thread(
     }
 }
 
-fn twitter_thread(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String) {
+fn twitter_thread(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String, camera: Option<CameraClient>) {
     tokio::runtime::Builder::new()
         //.threaded_scheduler()
         .basic_scheduler()
@@ -406,14 +412,11 @@ fn twitter_thread(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: 
         .build()
         .unwrap()
         .block_on(async move {
-            loop {
-                let p = printer.clone();
-                log_result(twitter_thread_internal(p, key.clone(), secret_key.clone()).await)
-            }
+            log_result(twitter_thread_internal(printer, key.clone(), secret_key.clone(), camera).await)
         });
 }
 
-async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String) -> Result<()> {
+async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String, camera: Option<CameraClient>) -> Result<()> {
     info!("Twiter is logging in...");
 
     use tokio::stream::StreamExt;
@@ -429,12 +432,11 @@ async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: Strin
 
     while let Some(res) = stream.next().await {
         let msg = res?;
-        if let Some(printer) = &printer {
-            if let StreamMessage::Tweet(t) = msg {
-                printer.send(PrinterMsg::Text(t.text))?;
-            }
+        if let (StreamMessage::Tweet(t), Some(printer)) = (msg, &printer) {
+            printer.send(PrinterMsg::Text(t.text))?;
         }
     }
+
     Ok(())
 }
 
@@ -457,48 +459,6 @@ fn main() -> Result<()> {
         sender
     });
 
-    /*
-    // Create a new capture device with a few extra parameters
-    let mut dev = (!opt.disable_camera)
-        .then(|| -> Result<&'static mut Device> {
-            let dev = Device::new(0).context("Open device")?;
-
-            // Let's say we want to explicitly request another format
-            let mut fmt = dev.format().context("Read format")?;
-            fmt.width = 1280;
-            fmt.height = 720;
-            fmt.fourcc = FourCC::new(b"MJPG");
-            dev.set_format(&fmt).context("Write format")?;
-
-            // The camera will remain in use for the duration of the program.
-            let dev = Box::leak(Box::new(dev));
-
-            Ok(dev)
-        })
-        .transpose()
-        .context("Failed to open camera")?;
-
-    // Create the stream, which will internally 'allocate' (as in map) the
-    // number of requested buffers for us.
-    let mut camera_stream = dev
-        .as_mut()
-        .map(|dev| -> Result<Stream> {
-            let mut stream = Stream::with_buffers(dev, Type::VideoCapture, 4)
-                .context("Failed to create buffer stream")?;
-
-            // Prime the camera
-            let steps = 5;
-            for i in 1..=steps {
-                info!("Priming the camera {}/{}", i, steps);
-                stream.next()?;
-            }
-
-            Ok(stream)
-        })
-        .transpose()?;
-    let camera_stream = Arc::new(Mutex::new(camera_stream));
-    */
-
     // Spawn Lua thread 
     let (lua_tx, lua_rx) = mpsc::channel::<String>();
     let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
@@ -514,18 +474,37 @@ fn main() -> Result<()> {
             max_bytes_image,
         )
     });
+    
+    // Spawn camera thread
+    let (discord_camera, twitter_camera) = if opt.disable_camera {
+        (None, None)
+    } else {
+        let (camera_tx, camera_rx) = mpsc::channel();
+        let (discord_tx, discord_rx) = mpsc::channel();
+        let (twitter_tx, twitter_rx) = mpsc::channel();
+        std::thread::spawn(move || camera_thread(camera_rx, vec![discord_tx, twitter_tx]));
+        let discord = CameraClient {
+            recv: discord_rx,
+            sender: camera_tx.clone(),
+            id: 0,
+        };
+        let twitter = CameraClient {
+            recv: twitter_rx,
+            sender: camera_tx,
+            id: 1,
+        };
+        (Some(discord), Some(twitter))
+    };
 
     // Spawn Discord thread
     let discord_printer = printer.clone();
     if let Some(token) = opt.discord_token {
-        std::thread::spawn(move || loop {
-            log_result(discord_thread(&token, time_range, lua_tx.clone(), discord_printer.clone()))
-        });
+        std::thread::spawn(move || log_result(discord_thread(&token, time_range, lua_tx.clone(), discord_printer.clone(), discord_camera)));
     }
 
     // Enter Twitter thread
     if let Some((key, secret_key)) = opt.twitter_key.zip(opt.twitter_secret) {
-        twitter_thread(printer.clone(), key, secret_key);
+        twitter_thread(printer.clone(), key, secret_key, twitter_camera);
     }
 
     lua_thread.join().unwrap()?;

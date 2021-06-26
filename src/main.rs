@@ -468,7 +468,11 @@ async fn twitter_thread_internal(
             info!("Handling Tweet from {}", user_name);
 
             // Send the tweet
-            let text = format!("{}: {}\n\n", user_name, t.text);
+            let tweet_text = t
+                .text
+                .trim_start_matches("@")
+                .trim_start_matches(&config.screen_name);
+            let text = format!("{}: {}\n\n", user_name, tweet_text);
             printer
                 .send(PrinterMsg::Text(text))
                 .context("Send to printer")?;
@@ -487,7 +491,8 @@ async fn twitter_thread_internal(
                     &token,
                 )
                 .await
-                .context("Upload image image")?;
+                .context("Upload image")?;
+
                 let mut draft = egg_mode::tweet::DraftTweet::new("Here ya go!")
                     .in_reply_to(t.id)
                     .auto_populate_reply_metadata(true);

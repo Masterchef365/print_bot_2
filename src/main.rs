@@ -1,6 +1,6 @@
 use anyhow::{ensure, format_err, Context, Result};
-use discord::model::Event;
 use chrono::NaiveTime;
+use discord::model::Event;
 use discord::Discord;
 use log::{error, info, LevelFilter};
 use std::path::PathBuf;
@@ -15,15 +15,15 @@ use v4l::Device;
 use v4l::FourCC;
 
 use image::RgbImage;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 mod printer;
 mod time_range;
-use time_range::TimeRange;
 use printer::{PrintHandler, PrinterMsg};
+use time_range::TimeRange;
 mod twitter_login;
 
 #[derive(Debug, StructOpt)]
@@ -177,7 +177,7 @@ fn lua_thread(
                     let path = chrono::Local::now().format("lua-%H-%M-%S.png").to_string();
                     eprintln!("Lua image {}x{}: {}", img.width(), img.height(), &path);
                     img.save(&path)?;
-                },
+                }
                 PrinterMsg::Text(txt) => eprintln!("Lua text: {}", txt),
             }),
         }
@@ -220,7 +220,8 @@ fn lua_thread(
                     true => {
                         let image = lua_image_to_rbgimage(v)
                             .map_err(|e| Error::RuntimeError(e.to_string()))?;
-                        print_res(&lua_printer, PrinterMsg::Image(image)).map_err(|e| Error::RuntimeError(e.to_string()))
+                        print_res(&lua_printer, PrinterMsg::Image(image))
+                            .map_err(|e| Error::RuntimeError(e.to_string()))
                     }
                     false => Err(Error::RuntimeError("Image byte limit reached".into())),
                 }
@@ -307,9 +308,9 @@ fn value_to_string(value: &Value) -> String {
 
 /// Discord interaction
 fn discord_thread(
-    token: &str, 
-    time_range: Option<TimeRange>, 
-    lua_tx: Sender<String>, 
+    token: &str,
+    time_range: Option<TimeRange>,
+    lua_tx: Sender<String>,
     printer: Option<Sender<PrinterMsg>>,
     camera: Option<CameraClient>,
 ) -> Result<()> {
@@ -377,14 +378,22 @@ fn discord_thread(
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
                     }
-                    SHOW_COMMAND => match camera.as_ref().and_then(|c| c.capture(Duration::from_secs(2))) {
+                    SHOW_COMMAND => match camera
+                        .as_ref()
+                        .and_then(|c| c.capture(Duration::from_secs(2)))
+                    {
                         Some(buf) => {
                             info!(
                                 "{}#{} took a picture.",
                                 message.author.name, message.author.discriminator
                             );
                             discord
-                                .send_file(message.channel_id, "", std::io::Cursor::new(buf), "image.jpg")
+                                .send_file(
+                                    message.channel_id,
+                                    "",
+                                    std::io::Cursor::new(buf),
+                                    "image.jpg",
+                                )
                                 .context("Failed to send image file!")?;
                         }
                         None => {
@@ -396,14 +405,23 @@ fn discord_thread(
             }
             Ok(_) => {}
             Err(discord::Error::Closed(code, body)) => {
-                break Err(format_err!("Gateway closed on us with code {:?}: {}", code, body));
+                break Err(format_err!(
+                    "Gateway closed on us with code {:?}: {}",
+                    code,
+                    body
+                ));
             }
             Err(err) => error!("Receive error: {:?}", err),
         }
     }
 }
 
-fn twitter_thread(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String, camera: Option<CameraClient>) {
+fn twitter_thread(
+    printer: Option<Sender<PrinterMsg>>,
+    key: String,
+    secret_key: String,
+    camera: Option<CameraClient>,
+) {
     tokio::runtime::Builder::new()
         //.threaded_scheduler()
         .basic_scheduler()
@@ -411,43 +429,71 @@ fn twitter_thread(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: 
         .build()
         .unwrap()
         .block_on(async move {
-            log_result(twitter_thread_internal(printer, key.clone(), secret_key.clone(), camera).await)
+            log_result(
+                twitter_thread_internal(printer, key.clone(), secret_key.clone(), camera)
+                    .await
+                    .context("Twitter failed"),
+            )
         });
 }
 
-async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String, camera: Option<CameraClient>) -> Result<()> {
+async fn twitter_thread_internal(
+    printer: Option<Sender<PrinterMsg>>,
+    key: String,
+    secret_key: String,
+    camera: Option<CameraClient>,
+) -> Result<()> {
     info!("Twitter is logging in...");
 
     use tokio::stream::StreamExt;
     let con_token = egg_mode::KeyPair::new(key, secret_key);
-    let (config, token) = twitter_login::login(con_token, "login.txt").await?;
+    let (config, token) = twitter_login::login(con_token, "login.txt")
+        .await
+        .context("Log in")?;
 
     info!("Twitter logged in as {}", config.screen_name);
 
     use egg_mode::stream::{filter, StreamMessage};
-    let mut stream = filter()
-        .follow(&[config.user_id])
-        .start(&token);
+    let mut stream = filter().follow(&[config.user_id]).start(&token);
 
     while let Some(res) = stream.next().await {
-        let msg = res?;
+        let msg = res.context("Receive message")?;
         if let (StreamMessage::Tweet(t), Some(printer)) = (msg, &printer) {
+            // Get username
+            let user_name = match &t.user {
+                Some(u) => &u.screen_name,
+                None => continue,
+            };
+
+            info!("Handling Tweet from {}", user_name);
+
             // Send the tweet
-            printer.send(PrinterMsg::Text(t.text + "\n\n"))?;
+            let text = format!("{}: {}\n\n", user_name, t.text);
+            printer
+                .send(PrinterMsg::Text(text))
+                .context("Send to printer")?;
 
             // Wait for printer to print
             tokio::time::delay_for(Duration::from_secs(1)).await;
 
             // Take a picture and reply with it
-            if let Some(pic) = camera.as_ref().and_then(|c| c.capture(Duration::from_secs(2))) {
-                let handle = egg_mode::media::upload_media(&pic, &egg_mode::media::media_types::image_jpg(), &token).await?;
+            if let Some(pic) = camera
+                .as_ref()
+                .and_then(|c| c.capture(Duration::from_secs(2)))
+            {
+                let handle = egg_mode::media::upload_media(
+                    &pic,
+                    &egg_mode::media::media_types::image_jpg(),
+                    &token,
+                )
+                .await
+                .context("Upload image image")?;
                 let mut draft = egg_mode::tweet::DraftTweet::new("Here ya go!")
                     .in_reply_to(t.id)
                     .auto_populate_reply_metadata(true);
                 draft.add_media(handle.id);
-                draft.send(&token).await?;
+                draft.send(&token).await.context("Send tweet")?;
             }
-
         }
     }
 
@@ -473,7 +519,7 @@ fn main() -> Result<()> {
         sender
     });
 
-    // Spawn Lua thread 
+    // Spawn Lua thread
     let (lua_tx, lua_rx) = mpsc::channel::<String>();
     let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
     let max_bytes_text = opt.max_bytes_text.unwrap_or(u32::MAX);
@@ -488,7 +534,7 @@ fn main() -> Result<()> {
             max_bytes_image,
         )
     });
-    
+
     // Spawn camera thread
     let (discord_camera, twitter_camera) = if opt.disable_camera {
         (None, None)
@@ -513,7 +559,15 @@ fn main() -> Result<()> {
     // Spawn Discord thread
     let discord_printer = printer.clone();
     if let Some(token) = opt.discord_token {
-        std::thread::spawn(move || log_result(discord_thread(&token, time_range, lua_tx.clone(), discord_printer.clone(), discord_camera)));
+        std::thread::spawn(move || {
+            log_result(discord_thread(
+                &token,
+                time_range,
+                lua_tx.clone(),
+                discord_printer.clone(),
+                discord_camera,
+            ))
+        });
     }
 
     // Enter Twitter thread
@@ -540,8 +594,9 @@ __Commands__:
 const SORRY_PRINTER: &str = "Sorry, the printer has been disabled for now :(";
 const SORRY_CAMERA: &str = "Sorry, the camera has been disabled for now :(";
 
-fn sorry_asleep<T: chrono::TimeZone>(range: TimeRange, time: chrono::DateTime<T>) -> String 
-where T::Offset: std::fmt::Display
+fn sorry_asleep<T: chrono::TimeZone>(range: TimeRange, time: chrono::DateTime<T>) -> String
+where
+    T::Offset: std::fmt::Display,
 {
     let TimeRange(begin, end) = range;
     format!("Sorry, I'm asleep and the printer makes a bunch of noise. The current bot-local time is {} and the bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!", begin, end, time.format("%H:%M"), time.format("%:z"))

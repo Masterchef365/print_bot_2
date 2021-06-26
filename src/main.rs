@@ -416,13 +416,13 @@ fn twitter_thread(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: 
 }
 
 async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: String, secret_key: String, camera: Option<CameraClient>) -> Result<()> {
-    info!("Twiter is logging in...");
+    info!("Twitter is logging in...");
 
     use tokio::stream::StreamExt;
     let con_token = egg_mode::KeyPair::new(key, secret_key);
     let (config, token) = twitter_login::login(con_token, "login.txt").await?;
 
-    info!("Twitter logged in as {} config.screen_name", config.screen_name);
+    info!("Twitter logged in as {}", config.screen_name);
 
     use egg_mode::stream::{filter, StreamMessage};
     let mut stream = filter()
@@ -433,8 +433,12 @@ async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>, key: Strin
         let msg = res?;
         if let (StreamMessage::Tweet(t), Some(printer)) = (msg, &printer) {
             // Send the tweet
-            printer.send(PrinterMsg::Text(t.text))?;
+            printer.send(PrinterMsg::Text(t.text + "\n\n"))?;
 
+            // Wait for printer to print
+            tokio::time::delay_for(Duration::from_secs(1)).await;
+
+            // Take a picture and reply with it
             if let Some(pic) = camera.as_ref().and_then(|c| c.capture(Duration::from_secs(2))) {
                 let handle = egg_mode::media::upload_media(&pic, &egg_mode::media::media_types::image_jpg(), &token).await?;
                 let mut draft = egg_mode::tweet::DraftTweet::new("Here ya go!")

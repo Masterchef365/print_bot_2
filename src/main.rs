@@ -1,6 +1,6 @@
 use anyhow::{ensure, format_err, Context, Result};
-use chrono::prelude::*;
 use discord::model::Event;
+use chrono::NaiveTime;
 use discord::Discord;
 use log::{error, info, LevelFilter};
 use std::path::PathBuf;
@@ -18,13 +18,16 @@ use image::RgbImage;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 
 mod printer;
+mod time_range;
+use time_range::TimeRange;
 use printer::{PrintHandler, PrinterMsg};
-type TimeRange = (NaiveTime, NaiveTime);
+type Camera = Arc<Mutex<Stream<'static>>>;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "Printer bot 2", about = "A discord bot for receipt printers")]
+#[structopt(name = "Printer bot 2", about = "A bot for receipt printers")]
 struct Opt {
     /// Disable the camera
     #[structopt(long)]
@@ -117,7 +120,7 @@ fn lua_thread(
             Some(p) => Ok(p.send(msg)?),
             None => Ok(match msg {
                 PrinterMsg::Image(img) => {
-                    let path = Local::now().format("lua-%H-%M-%S.png").to_string();
+                    let path = chrono::Local::now().format("lua-%H-%M-%S.png").to_string();
                     eprintln!("Lua image {}x{}: {}", img.width(), img.height(), &path);
                     img.save(&path)?;
                 },
@@ -248,91 +251,11 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-fn main() -> Result<()> {
-    // Arg parsing
-    let opt = Opt::from_args();
-    let begin_time = opt.begin_time.as_ref().map(|s| parse_time(s)).transpose()?;
-    let end_time = opt.end_time.as_ref().map(|s| parse_time(s)).transpose()?;
-    let time_range = begin_time.zip(end_time);
-
-    // Set up logging
-    simple_logging::log_to_file(opt.log_path, LevelFilter::Info)?;
-
-    // Set up printer concurrently with logging into Discord
-    let print_handler = if opt.disable_printer {
-        None
-    } else {
-        Some(thread::spawn(
-            || -> Result<(PrintHandler, Sender<PrinterMsg>)> { Ok(PrintHandler::new()?) },
-        ))
-    };
-
+/*
+fn discord(token: &str) -> Result<()> {
     // Log in to Discord using a bot token from the environment
     info!("Logging into discord");
     let discord = Discord::from_bot_token(&opt.token).context("login failed")?;
-
-    // Wait for the print handler...
-    let mut print_handler = print_handler.and_then(|p| p.join().ok()).transpose()?;
-
-    // Establish and use a websocket connection
-    let (mut connection, _) = discord.connect().context("connect failed")?;
-
-    // ################# CAMERA ######################
-
-    // Create a new capture device with a few extra parameters
-    let mut dev = (!opt.disable_camera)
-        .then(|| -> Result<Device> {
-            let dev = Device::new(0).context("Open device")?;
-
-            // Let's say we want to explicitly request another format
-            let mut fmt = dev.format().context("Read format")?;
-            fmt.width = 1280;
-            fmt.height = 720;
-            fmt.fourcc = FourCC::new(b"MJPG");
-            dev.set_format(&fmt).context("Write format")?;
-            Ok(dev)
-        })
-        .transpose()
-        .context("Failed to open camera")?;
-
-    // Create the stream, which will internally 'allocate' (as in map) the
-    // number of requested buffers for us.
-    let mut stream = dev
-        .as_mut()
-        .map(|dev| -> Result<Stream> {
-            let mut stream = Stream::with_buffers(dev, Type::VideoCapture, 4)
-                .context("Failed to create buffer stream")?;
-
-            // Prime the camera
-            let steps = 5;
-            for i in 1..=steps {
-                info!("Priming the camera {}/{}", i, steps);
-                stream.next()?;
-            }
-
-            Ok(stream)
-        })
-        .transpose()?;
-
-    // ################# LUA ######################
-
-    let (lua_tx, lua_rx) = mpsc::channel::<String>();
-    let sender = print_handler.as_ref().map(|(_, s)| s.clone());
-    let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
-    let max_bytes_text = opt.max_bytes_text.unwrap_or(u32::MAX);
-    let max_bytes_image = opt.max_bytes_image.unwrap_or(u32::MAX);
-    let lua_thread = std::thread::spawn(move || {
-        lua_thread(
-            lua_rx,
-            sender,
-            max_instructions,
-            max_bytes_text,
-            max_bytes_image,
-        )
-    });
-    // TODO: Graceful shutdown command for lua channel?
-
-    // ###############################################
 
     info!("Ready.");
     loop {
@@ -410,12 +333,102 @@ fn main() -> Result<()> {
             }
             Ok(_) => {}
             Err(discord::Error::Closed(code, body)) => {
-                error!("Gateway closed on us with code {:?}: {}", code, body);
-                break;
+                break Err(format_err!("Gateway closed on us with code {:?}: {}", code, body));
             }
             Err(err) => error!("Receive error: {:?}", err),
         }
     }
+}
+*/
+
+fn main() -> Result<()> {
+    // Arg parsing
+    let opt = Opt::from_args();
+    let begin_time = opt.begin_time.as_ref().map(|s| parse_time(s)).transpose()?;
+    let end_time = opt.end_time.as_ref().map(|s| parse_time(s)).transpose()?;
+    let time_range = begin_time.zip(end_time);
+
+    // Set up logging
+    simple_logging::log_to_file(opt.log_path, LevelFilter::Info)?;
+
+    // Set up printer concurrently with logging into Discord
+    let print_handler = if opt.disable_printer {
+        None
+    } else {
+        Some(thread::spawn(
+            || -> Result<(PrintHandler, Sender<PrinterMsg>)> { Ok(PrintHandler::new()?) },
+        ))
+    };
+
+    // Wait for the print handler...
+    let mut print_handler = print_handler.and_then(|p| p.join().ok()).transpose()?;
+
+    // Establish and use a websocket connection
+    //let (mut connection, _) = discord.connect().context("connect failed")?;
+
+    // ################# CAMERA ######################
+
+    // Create a new capture device with a few extra parameters
+    let mut dev = (!opt.disable_camera)
+        .then(|| -> Result<&'static mut Device> {
+            let dev = Device::new(0).context("Open device")?;
+
+            // Let's say we want to explicitly request another format
+            let mut fmt = dev.format().context("Read format")?;
+            fmt.width = 1280;
+            fmt.height = 720;
+            fmt.fourcc = FourCC::new(b"MJPG");
+            dev.set_format(&fmt).context("Write format")?;
+
+            // The camera will remain in use for the duration of the program.
+            let dev = Box::leak(Box::new(dev));
+
+            Ok(dev)
+        })
+        .transpose()
+        .context("Failed to open camera")?;
+
+    // Create the stream, which will internally 'allocate' (as in map) the
+    // number of requested buffers for us.
+    let mut camera_stream = dev
+        .as_mut()
+        .map(|dev| -> Result<Stream> {
+            let mut stream = Stream::with_buffers(dev, Type::VideoCapture, 4)
+                .context("Failed to create buffer stream")?;
+
+            // Prime the camera
+            let steps = 5;
+            for i in 1..=steps {
+                info!("Priming the camera {}/{}", i, steps);
+                stream.next()?;
+            }
+
+            Ok(stream)
+        })
+        .transpose()?;
+    let camera_stream = Arc::new(Mutex::new(camera_stream));
+
+    // ################# LUA ######################
+
+    let (lua_tx, lua_rx) = mpsc::channel::<String>();
+    let sender = print_handler.as_ref().map(|(_, s)| s.clone());
+    let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
+    let max_bytes_text = opt.max_bytes_text.unwrap_or(u32::MAX);
+    let max_bytes_image = opt.max_bytes_image.unwrap_or(u32::MAX);
+    let lua_thread = std::thread::spawn(move || {
+        lua_thread(
+            lua_rx,
+            sender,
+            max_instructions,
+            max_bytes_text,
+            max_bytes_image,
+        )
+    });
+    // TODO: Graceful shutdown command for lua channel?
+
+    // ###############################################
+
+    //discord();
 
     lua_thread.join().unwrap()?;
 
@@ -435,60 +448,11 @@ __Commands__:
 
 const SORRY_PRINTER: &str = "Sorry, the printer has been disabled for now :(";
 const SORRY_CAMERA: &str = "Sorry, the camera has been disabled for now :(";
+const SORRY_ASLEEP: &str = "Sorry, I'm asleep and the printer makes a bunch of noise. The bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!";
 
-fn time_greater(a: NaiveTime, b: NaiveTime) -> bool {
-    (a - b).num_milliseconds() > 0
-}
-
-fn time_test((begin, end): TimeRange, now: NaiveTime) -> bool {
-    time_greater(end, begin) != (time_greater(now, end) == time_greater(now, begin))
-}
-
-fn check_time(range: TimeRange) -> Result<(), String> {
-    let now = Local::now();
-    let now_naive = now.naive_local().time();
-    if time_test(range, now_naive) {
-        Ok(())
-    } else {
-        let (begin, end) = range;
-        Err(format!("Sorry, I'm asleep and the printer makes a bunch of noise. The bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!", begin, end, now.format("%:z")))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_time() {
-        assert!(!time_test(
-            (NaiveTime::from_hms(10, 0, 0), NaiveTime::from_hms(14, 0, 0)),
-            NaiveTime::from_hms(9, 0, 0),
-        ));
-
-        assert!(!time_test(
-            (NaiveTime::from_hms(10, 0, 0), NaiveTime::from_hms(14, 0, 0)),
-            NaiveTime::from_hms(15, 0, 0),
-        ));
-
-        assert!(time_test(
-            (NaiveTime::from_hms(10, 0, 0), NaiveTime::from_hms(14, 0, 0)),
-            NaiveTime::from_hms(13, 0, 0),
-        ));
-
-        assert!(time_test(
-            (NaiveTime::from_hms(14, 0, 0), NaiveTime::from_hms(10, 0, 0)),
-            NaiveTime::from_hms(9, 0, 0),
-        ));
-
-        assert!(time_test(
-            (NaiveTime::from_hms(14, 0, 0), NaiveTime::from_hms(10, 0, 0)),
-            NaiveTime::from_hms(15, 0, 0),
-        ));
-
-        assert!(!time_test(
-            (NaiveTime::from_hms(14, 0, 0), NaiveTime::from_hms(10, 0, 0)),
-            NaiveTime::from_hms(13, 0, 0),
-        ));
-    }
+fn sorry_asleep<T: chrono::TimeZone>(range: TimeRange, time: chrono::DateTime<T>) -> String 
+where T::Offset: std::fmt::Display
+{
+    let TimeRange(begin, end) = range;
+    format!("Sorry, I'm asleep and the printer makes a bunch of noise. The current bot-local time is {} and the bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!", begin, end, time.format("%H:%M"), time.format("%:z"))
 }

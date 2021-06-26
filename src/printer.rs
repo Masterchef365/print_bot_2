@@ -35,7 +35,7 @@ pub enum PrinterMsg {
 }
 
 /// Printer thread is seperate from Discord thread to prevent blockage
-fn printer_thread(receiver: &mut Receiver<PrinterMsg>) -> Result<()> {
+pub fn printer_thread(receiver: &mut Receiver<PrinterMsg>) -> Result<()> {
     info!("Starting printer thread...");
 
     // Device init
@@ -72,31 +72,25 @@ fn printer_thread(receiver: &mut Receiver<PrinterMsg>) -> Result<()> {
 
 impl PrintHandler {
     /// Create a new handler
-    pub fn new() -> Result<(Self, Sender<PrinterMsg>)> {
+    pub fn new(printer: Sender<PrinterMsg>) -> Result<Self> {
         // Hyper client
         let ssl = NativeTlsClient::new()?;
         let connector = HttpsConnector::new(ssl);
         let client = hyper::Client::with_connector(connector);
 
-        // Channel for Discord <-> printer thread communication
-        let (printer, mut receiver) = mpsc::channel();
-        thread::spawn(move || loop {
-            crate::log_result(printer_thread(&mut receiver))
-        });
-
         let ditherer = Ditherer::from_str("floyd")?;
 
         let sender = printer.clone();
 
-        Ok((Self {
+        Ok(Self {
             client,
             ditherer,
             printer,
-        }, sender))
+        })
     }
 
     /// Handle a printing command
-    pub fn handle_print_request(&mut self, message: Message) -> Result<()> {
+    pub fn handle_discord(&mut self, message: Message) -> Result<()> {
         // Check to see if there's anything to do
         let text = message
             .content

@@ -24,7 +24,7 @@ mod printer;
 mod time_range;
 use time_range::TimeRange;
 use printer::{PrintHandler, PrinterMsg};
-type Camera = Arc<Mutex<Stream<'static>>>;
+type Camera = Arc<Mutex<Option<Stream<'static>>>>;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "Printer bot 2", about = "A bot for receipt printers")]
@@ -41,6 +41,7 @@ struct Opt {
     #[structopt(long, default_value = "print_bot.log")]
     log_path: PathBuf,
 
+    // TODO discord_token: Option<String>
     /// Discord token
     #[structopt(long)]
     token: String,
@@ -100,6 +101,26 @@ fn parse_time(s: &str) -> Result<NaiveTime> {
 
 fn lua_err(res: mlua::Error) -> anyhow::Error {
     format_err!("{}", res)
+}
+
+fn camera_next_frame(camera: Camera) -> Option<&'static [u8]> {
+    /*
+    match camera.lock() {
+        Ok(ref mut c) => {
+            match c.as_mut()?.next() {
+                Ok((frame, _meta)) => Some(frame),
+                Err(e) => {
+                    error!("Camera error: {}", e);
+                    drop(camera);
+                    c.take();
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
+    */
+    todo!()
 }
 
 /// Role: Act as the communication layer between Discord, LUA, and the Printer
@@ -251,13 +272,25 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-/*
-fn discord(token: &str) -> Result<()> {
+/// Discord interaction
+fn discord_thread(
+    token: &str, 
+    //camera: Camera, 
+    time_range: Option<TimeRange>, 
+    lua_tx: Sender<String>, 
+    printer: Option<Sender<PrinterMsg>>
+) -> Result<()> {
+    // Set up printer concurrently with logging into Discord
+    let mut print_handler = printer.map(|tx| PrintHandler::new(tx)).transpose()?;
+
     // Log in to Discord using a bot token from the environment
     info!("Logging into discord");
-    let discord = Discord::from_bot_token(&opt.token).context("login failed")?;
+    let discord = Discord::from_bot_token(token).context("login failed")?;
 
-    info!("Ready.");
+    // Establish and use a websocket connection
+    let (mut connection, _) = discord.connect().context("connect failed")?;
+
+    info!("Discord ready.");
     loop {
         match connection.recv_event() {
             Ok(Event::MessageCreate(message)) => {
@@ -275,13 +308,13 @@ fn discord(token: &str) -> Result<()> {
                 // Run command
                 match cmd {
                     PRINT_COMMAND => {
-                        if let Some(Err(msg)) = time_range.map(|range| check_time(range)) {
-                            info!(
-                                "Rejecting print job from {} outside of time range",
-                                message.author.name
-                            );
-                            discord.send_message(message.channel_id, &msg, "", false)?;
-                            continue;
+                        if let Some(time_range) = time_range {
+                            let (time, in_range) = time_range.check_local();
+                            if !in_range {
+                                let msg = sorry_asleep(time_range, time);
+                                discord.send_message(message.channel_id, &msg, "", false)?;
+                                continue;
+                            }
                         }
 
                         info!(
@@ -289,32 +322,30 @@ fn discord(token: &str) -> Result<()> {
                             message.author.name, message.author.discriminator
                         );
 
-                        if let Some((handler, _)) = &mut print_handler {
-                            log_result(handler.handle_print_request(message));
+                        if let Some(handler) = &mut print_handler {
+                            log_result(handler.handle_discord(message));
                         } else {
                             discord.send_message(message.channel_id, SORRY_PRINTER, "", false)?;
                         }
                     }
                     LUA_COMMAND => {
-                        if let Some(Err(msg)) = time_range.map(|range| check_time(range)) {
-                            info!(
-                                "Rejecting lua job from {} outside of time range",
-                                message.author.name
-                            );
-                            discord.send_message(message.channel_id, &msg, "", false)?;
-                            continue;
+                        if let Some(time_range) = time_range {
+                            let (time, in_range) = time_range.check_local();
+                            if !in_range {
+                                let msg = sorry_asleep(time_range, time);
+                                discord.send_message(message.channel_id, &msg, "", false)?;
+                                continue;
+                            }
                         }
+
                         lua_tx.send(message.content.trim_start_matches(LUA_COMMAND).to_string())?
                     }
                     HELP_COMMAND => {
                         discord.send_message(message.channel_id, HELP_TEXT, "", false)?;
                     }
-                    SHOW_COMMAND => match stream
-                        .as_mut()
-                        .ok_or_else(|| format_err!("Camera not set up"))
-                        .and_then(|s| Ok(s.next()?))
-                    {
-                        Ok((buf, _)) => {
+                    /*
+                    SHOW_COMMAND => match camera_next_frame(camera) {
+                        Some(buf) => {
                             info!(
                                 "{}#{} took a picture.",
                                 message.author.name, message.author.discriminator
@@ -323,11 +354,11 @@ fn discord(token: &str) -> Result<()> {
                                 .send_file(message.channel_id, "", buf, "image.jpg")
                                 .context("Failed to send image file!")?;
                         }
-                        Err(e) => {
-                            error!("Camera error: {}", e);
+                        None => {
                             discord.send_message(message.channel_id, SORRY_CAMERA, "", false)?;
                         }
                     },
+                    */
                     _ => (),
                 }
             }
@@ -339,35 +370,27 @@ fn discord(token: &str) -> Result<()> {
         }
     }
 }
-*/
 
 fn main() -> Result<()> {
     // Arg parsing
     let opt = Opt::from_args();
     let begin_time = opt.begin_time.as_ref().map(|s| parse_time(s)).transpose()?;
     let end_time = opt.end_time.as_ref().map(|s| parse_time(s)).transpose()?;
-    let time_range = begin_time.zip(end_time);
+    let time_range = begin_time.zip(end_time).map(|(b, e)| TimeRange(b, e));
 
     // Set up logging
     simple_logging::log_to_file(opt.log_path, LevelFilter::Info)?;
 
-    // Set up printer concurrently with logging into Discord
-    let print_handler = if opt.disable_printer {
-        None
-    } else {
-        Some(thread::spawn(
-            || -> Result<(PrintHandler, Sender<PrinterMsg>)> { Ok(PrintHandler::new()?) },
-        ))
-    };
+    // Channel for Discord <-> printer thread communication
+    let printer = (!opt.disable_printer).then(|| {
+        let (sender, mut receiver) = mpsc::channel();
+        thread::spawn(move || loop {
+            crate::log_result(printer::printer_thread(&mut receiver))
+        });
+        sender
+    });
 
-    // Wait for the print handler...
-    let mut print_handler = print_handler.and_then(|p| p.join().ok()).transpose()?;
-
-    // Establish and use a websocket connection
-    //let (mut connection, _) = discord.connect().context("connect failed")?;
-
-    // ################# CAMERA ######################
-
+    /*
     // Create a new capture device with a few extra parameters
     let mut dev = (!opt.disable_camera)
         .then(|| -> Result<&'static mut Device> {
@@ -407,18 +430,19 @@ fn main() -> Result<()> {
         })
         .transpose()?;
     let camera_stream = Arc::new(Mutex::new(camera_stream));
+    */
 
     // ################# LUA ######################
 
     let (lua_tx, lua_rx) = mpsc::channel::<String>();
-    let sender = print_handler.as_ref().map(|(_, s)| s.clone());
     let max_instructions = opt.max_instructions.unwrap_or(u32::MAX);
     let max_bytes_text = opt.max_bytes_text.unwrap_or(u32::MAX);
     let max_bytes_image = opt.max_bytes_image.unwrap_or(u32::MAX);
+    let lua_printer = printer.clone();
     let lua_thread = std::thread::spawn(move || {
         lua_thread(
             lua_rx,
-            sender,
+            lua_printer,
             max_instructions,
             max_bytes_text,
             max_bytes_image,
@@ -426,9 +450,10 @@ fn main() -> Result<()> {
     });
     // TODO: Graceful shutdown command for lua channel?
 
-    // ###############################################
-
-    //discord();
+    let token = opt.token;
+    std::thread::spawn(move || loop {
+        log_result(discord_thread(&token, time_range, lua_tx.clone(), printer.clone()))
+    });
 
     lua_thread.join().unwrap()?;
 
@@ -448,7 +473,6 @@ __Commands__:
 
 const SORRY_PRINTER: &str = "Sorry, the printer has been disabled for now :(";
 const SORRY_CAMERA: &str = "Sorry, the camera has been disabled for now :(";
-const SORRY_ASLEEP: &str = "Sorry, I'm asleep and the printer makes a bunch of noise. The bot is set up to become active between {} and {} (timezone: UTC{}). Please try again later!";
 
 fn sorry_asleep<T: chrono::TimeZone>(range: TimeRange, time: chrono::DateTime<T>) -> String 
 where T::Offset: std::fmt::Display

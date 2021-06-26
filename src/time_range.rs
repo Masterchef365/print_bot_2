@@ -1,16 +1,17 @@
 use chrono::prelude::*;
 
+#[derive(Copy, Clone)]
 pub struct TimeRange(pub NaiveTime, pub NaiveTime);
 
 impl TimeRange {
     /// Return Some(local_time) if not within range
-    fn check_local(&self) -> (DateTime<Local>, bool) {
+    pub fn check_local(&self) -> (DateTime<Local>, bool) {
         let now = Local::now();
         let now_naive = now.naive_local().time();
         (now, self.contains(now_naive))
     }
 
-    fn contains(&self, t: NaiveTime) -> bool {
+    pub fn contains(&self, t: NaiveTime) -> bool {
         let TimeRange(begin, end) = *self;
         time_greater(end, begin) != (time_greater(t, end) == time_greater(t, begin))
     }

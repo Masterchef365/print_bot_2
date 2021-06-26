@@ -454,11 +454,19 @@ async fn twitter_thread_internal(
     info!("Twitter logged in as {}", config.screen_name);
 
     use egg_mode::stream::{filter, StreamMessage};
-    let mut stream = filter().follow(&[config.user_id]).start(&token);
+    let mut stream = filter()
+        //.follow(&[config.user_id])
+        .track(&[format!("@{}", config.screen_name)])
+        .start(&token);
 
     while let Some(res) = stream.next().await {
         let msg = res.context("Receive message")?;
         if let (StreamMessage::Tweet(t), Some(printer)) = (msg, &printer) {
+            // Ignore yourself...
+            if t.id == config.user_id {
+                continue;
+            }
+
             // Get username
             let user_name = match &t.user {
                 Some(u) => &u.screen_name,

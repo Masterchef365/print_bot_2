@@ -25,6 +25,7 @@ mod time_range;
 use time_range::TimeRange;
 use printer::{PrintHandler, PrinterMsg};
 type Camera = Arc<Mutex<Option<Stream<'static>>>>;
+mod twitter_login;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "Printer bot 2", about = "A bot for receipt printers")]
@@ -308,6 +309,7 @@ fn discord_thread(
                 // Run command
                 match cmd {
                     PRINT_COMMAND => {
+                        // TODO: This should be calculated for the PRINTER and not for Discord!
                         if let Some(time_range) = time_range {
                             let (time, in_range) = time_range.check_local();
                             if !in_range {
@@ -369,6 +371,45 @@ fn discord_thread(
             Err(err) => error!("Receive error: {:?}", err),
         }
     }
+}
+
+fn twitter_thread(printer: Option<Sender<PrinterMsg>>) {
+    tokio::runtime::Builder::new()
+        //.threaded_scheduler()
+        .enable_all()
+        .build()
+        .unwrap()
+        .spawn(async move {
+            loop {
+                let p = printer.clone();
+                log_result(twitter_thread_internal(p).await)
+            }
+        });
+}
+
+async fn twitter_thread_internal(printer: Option<Sender<PrinterMsg>>) -> Result<()> {
+    use tokio::stream::StreamExt;
+    let env_var_errmsg = "Required environment variables are API_KEY, API_SECRET_KEY";//, and BEARER_TOKEN.";
+    let key = std::env::var("API_KEY").context(env_var_errmsg)?;
+    let secret_key = std::env::var("API_SECRET_KEY").context(env_var_errmsg)?;
+    let con_token = egg_mode::KeyPair::new(key, secret_key);
+    let (config, token) = twitter_login::login(con_token, "login.txt").await?;
+    dbg!(config.screen_name);
+
+    use egg_mode::stream::{filter, StreamMessage};
+    let mut stream = filter()
+        .follow(&[config.user_id])
+        .start(&token);
+
+    while let Some(res) = stream.next().await {
+        let msg = res?;
+        if let Some(printer) = &printer {
+            if let StreamMessage::Tweet(t) = msg {
+                printer.send(PrinterMsg::Text(t.text));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -449,6 +490,8 @@ fn main() -> Result<()> {
         )
     });
     // TODO: Graceful shutdown command for lua channel?
+
+    twitter_thread(printer.clone());
 
     let token = opt.token;
     std::thread::spawn(move || loop {

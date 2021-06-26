@@ -1,5 +1,4 @@
 /target
-set_env.sh
 *.png
 *.log
-debug.sh
+*.sh

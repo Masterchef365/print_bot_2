@@ -73,6 +73,10 @@ struct Opt {
     /// Max instructions
     #[structopt(long)]
     max_instructions: Option<u32>,
+
+    /// Print a header with each message
+    #[structopt(long)]
+    header: bool,
 }
 
 struct CameraClient {
@@ -313,6 +317,7 @@ fn discord_thread(
     lua_tx: Sender<String>,
     printer: Option<Sender<PrinterMsg>>,
     camera: Option<CameraClient>,
+    header: bool,
 ) -> Result<()> {
     // Set up printer concurrently with logging into Discord
     let mut print_handler = printer.map(|tx| PrintHandler::new(tx)).transpose()?;
@@ -358,7 +363,7 @@ fn discord_thread(
                         );
 
                         if let Some(handler) = &mut print_handler {
-                            log_result(handler.handle_discord(message));
+                            log_result(handler.handle_discord(message, header));
                         } else {
                             discord.send_message(message.channel_id, SORRY_PRINTER, "", false)?;
                         }
@@ -569,6 +574,8 @@ fn main() -> Result<()> {
         (Some(discord), Some(twitter))
     };
 
+    let header = opt.header;
+
     // Spawn Discord thread
     let discord_printer = printer.clone();
     if let Some(token) = opt.discord_token {
@@ -579,6 +586,7 @@ fn main() -> Result<()> {
                 lua_tx.clone(),
                 discord_printer.clone(),
                 discord_camera,
+                header,
             ))
         });
     }

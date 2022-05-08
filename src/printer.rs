@@ -87,7 +87,7 @@ impl PrintHandler {
     }
 
     /// Handle a printing command
-    pub fn handle_discord(&mut self, message: Message) -> Result<()> {
+    pub fn handle_discord(&mut self, message: Message, header: bool) -> Result<()> {
         // Check to see if there's anything to do
         let text = message
             .content
@@ -98,19 +98,21 @@ impl PrintHandler {
         }
 
         // Message header
-        let author = message.author.name;
-        let date = message.timestamp.format("%m/%d/%y %H:%M");
-        info!(
-            "Handling a new message from {}#{}",
-            author, message.author.discriminator
-        );
-        let full_date = format!("{} {}:", author, date);
-        let header = match full_date.chars().count() > PRINTER_CHARS_PER_LINE {
-            true => format!("{}: ", author),
-            false => full_date,
-        };
+        if header {
+            let author = message.author.name;
+            let date = message.timestamp.format("%m/%d/%y %H:%M");
+            info!(
+                "Handling a new message from {}#{}",
+                author, message.author.discriminator
+            );
+            let full_date = format!("{} {}:", author, date);
+            let header = match full_date.chars().count() > PRINTER_CHARS_PER_LINE {
+                true => format!("{}: ", author),
+                false => full_date,
+            };
 
-        self.print_text(header);
+            self.print_text(header);
+        }
 
         // Message body printing
         if !text.is_empty() {
